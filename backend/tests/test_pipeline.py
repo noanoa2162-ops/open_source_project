@@ -485,7 +485,7 @@ def _good_completion():
     empty = FieldReading(values=[], legibility="absent")
     parsed = PageReading(
         template="kupah_form",
-        **{k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "note")},
+        **{k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "upside_down", "note")},
     )
     parsed.first_name = FieldReading(values=["שרה"], legibility="clear")
     message = SimpleNamespace(parsed=parsed, refusal=None, content="")

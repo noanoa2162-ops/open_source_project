@@ -12,12 +12,23 @@ HOST = "127.0.0.1"
 PORT = 8000
 
 
+def _has_key_for(model: str) -> bool:
+    if model.startswith("claude"):
+        return bool(SETTINGS.anthropic_api_key)
+    if model.startswith(("gemini", "gemma")):
+        return bool(SETTINGS.gemini_api_key)
+    return bool(SETTINGS.openai_api_key)
+
+
 def run() -> None:
     url = f"http://{HOST}:{PORT}"
     print(f"\n  טופס למידע — דמו להאקתון")
-    print(f"  שופט A: {SETTINGS.judge_a_model}   מפתח Gemini: {'נטען' if SETTINGS.gemini_api_key else 'חסר!'}")
-    print(f"  שופט B: {SETTINGS.judge_b_model}   מפתח OpenAI: {'נטען' if SETTINGS.openai_api_key else 'חסר!'}")
-    print(f"  תקרת תקציב להעלאה: ${SETTINGS.max_cost_per_batch_usd:.2f}")
+    for model in SETTINGS.judges:
+        print(f"  קורא: {model}   מפתח: {'נטען' if _has_key_for(model) else 'חסר!'}")
+    if any(m.startswith("claude") for m in SETTINGS.judges):
+        print(f"  עומק חשיבה של Claude: {SETTINGS.claude_effort}")
+    cap = SETTINGS.max_cost_per_batch_usd
+    print(f"  תקרת תקציב להעלאה: {'אין' if cap <= 0 else f'${cap:.2f}'}")
     print(
         f"  עד {SETTINGS.max_files_per_batch} קבצים ו-{SETTINGS.max_pages_per_batch}"
         " טפסים בגרירה אחת (ניתן לשינוי ב-.env)"

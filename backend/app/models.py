@@ -37,6 +37,15 @@ class ExtractedField:
     region: Region | None = None
     # מה כל שופט קרא בשדה הזה — להשוואת מודלים במסך: {model, values, legibility}
     readings: list[dict] = field(default_factory=list)
+    # הערות "רכות": מוצגות ליד הערך, אבל לא צובעות בכתום ולא חוסמות ייצוא.
+    notes: list[str] = field(default_factory=list)
+    # ערכים שרק אחד השופטים מצא, כשהשני מצא חלק מהם. המזכירה יכולה להוסיף בלחיצה.
+    extra_values: list[str] = field(default_factory=list)
+    # המיקום של כל שופט בנפרד: {model: region}. `region` הוא הראשי שבו מתחילים.
+    regions_by_model: dict[str, Region] = field(default_factory=dict)
+    region_by: str = ""  # איזה שופט נתן את המיקום הראשי
+    region_verified: bool = True  # False = מיקום משופט שהמיקומים שלו עוד לא נבדקו
+    two_crops: bool = False  # מחלוקת אמיתית: מציגים את ההגדלה של כל שופט
 
     @property
     def is_empty(self) -> bool:
@@ -47,6 +56,17 @@ class ExtractedField:
             self.reasons.append(reason)
         if self.state != STATE_APPROVED:
             self.state = STATE_REVIEW
+
+    def note(self, reason: str) -> None:
+        """A small remark next to the value. Unlike `flag`, the field stays as it is."""
+        if reason not in self.notes:
+            self.notes.append(reason)
+
+    def settle(self) -> None:
+        """A person decided this field: automatic remarks no longer apply."""
+        self.reasons = []
+        self.notes = []
+        self.extra_values = []
 
 
 @dataclass
@@ -84,6 +104,8 @@ class FormRecord:
     cost_usd: float | None = None
     seconds: float = 0.0
     verified: bool = False  # המזכירה בדקה ושמרה כמאומת
+    upside_down: bool = False  # שני השופטים אמרו שהדף הגיע הפוך; סובב לתצוגה בלבד
+    straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
 
     @property
     def review_count(self) -> int:

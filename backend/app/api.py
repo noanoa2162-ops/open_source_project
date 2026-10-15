@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -40,7 +41,9 @@ def index() -> HTMLResponse:
 def config() -> dict:
     return {
         "model": SETTINGS.model,
-        "judges": [SETTINGS.judge_a_model, SETTINGS.judge_b_model],
+        "judges": SETTINGS.judges,
+        # עומק החשיבה מוצג רק כשקורא Claude פעיל
+        "effort": SETTINGS.claude_effort if any(m.startswith("claude") for m in SETTINGS.judges) else "",
         "has_key": SETTINGS.has_key,
         "max_cost_usd": SETTINGS.max_cost_per_batch_usd,
         "max_pages": SETTINGS.max_pages_per_batch,
@@ -126,9 +129,18 @@ def page_image(batch_id: str, source_index: int, page_number: int) -> FileRespon
 
 @app.get("/api/batches/{batch_id}/sources/{source_index}/pages/{page_number}/crops/{field_key}")
 def field_crop(
-    batch_id: str, source_index: int, page_number: int, field_key: str, ink: bool = False
+    batch_id: str,
+    source_index: int,
+    page_number: int,
+    field_key: str,
+    ink: bool = False,
+    by: str = "",
 ) -> FileResponse:
-    """The enlarged cut-out of one field, for the lower half of the split panel."""
+    """The enlarged cut-out of one field, for the lower half of the split panel.
+
+    `by` asks for one judge's location (when the judges disagree, each gets its
+    own cut-out); without it, the field's main location is used.
+    """
     batch = _require(batch_id)
     if field_key not in FIELDS_BY_KEY:
         raise HTTPException(404, "שדה לא מוכר.")
@@ -136,12 +148,17 @@ def field_crop(
         (r for r in batch.records if r.source_index == source_index and r.page_number == page_number),
         None,
     )
-    region = record.fields[field_key].region if record else None
+    field = record.fields[field_key] if record else None
+    region = None
+    if field is not None:
+        region = field.regions_by_model.get(by) if by else field.region
     page = pipeline.page_image_path(batch_id, source_index, page_number)
     if region is None or not page.is_file():
         # אין מיקום אמין — לא ממציאים תקריב. המסך יציג את העמוד המלא בלבד.
         raise HTTPException(404, "אין מיקום אמין לשדה זה.")
     target = pipeline.crop_path(batch_id, source_index, page_number, field_key)
+    if by:
+        target = target.with_name(f"{target.stem}.{_SAFE.sub('_', by)}.png")
     if ink:
         # אותה הגדלה מגרסת "דיו מודגש": בלי מרקרים, כתב היד שחור. מקומי, בלי עלות.
         page = ink_enhanced(page)
@@ -168,7 +185,7 @@ def verify_record(record_id: str) -> dict:
 
     for field in record.fields.values():
         field.state = STATE_APPROVED
-        field.reasons = []
+        field.settle()
     record.verified = True
 
     source = next(s for s in batch.sources if s.index == record.source_index)
@@ -194,8 +211,8 @@ def update_record(record_id: str, payload: dict) -> dict:
         values = [str(v).strip() for v in payload["values"] if str(v).strip()]
         field.values = values
         field.candidates = []  # הוכרע על ידי אדם
-        # תיקון אנושי מנקה את הדגלים האוטומטיים — האדם ראה את המקור.
-        field.reasons = []
+        # תיקון אנושי מנקה את הדגלים וההערות האוטומטיים — האדם ראה את המקור.
+        field.settle()
         field.state = STATE_APPROVED if values else STATE_REVIEW
         if not values:
             field.reasons = ["missing"]
@@ -203,7 +220,7 @@ def update_record(record_id: str, payload: dict) -> dict:
         if field.candidates:
             raise HTTPException(409, "יש לבחור אחת מהאפשרויות או לתקן ידנית.")
         field.state = STATE_APPROVED
-        field.reasons = []
+        field.settle()
 
     return _serialise(batch)
 
@@ -229,6 +246,9 @@ def delete_batch(batch_id: str) -> dict:
     if not store.delete(batch_id):
         raise HTTPException(404, "לא נמצא.")
     return {"deleted": True}
+
+
+_SAFE = re.compile(r"[^A-Za-z0-9.-]")
 
 
 def _require(batch_id: str) -> Batch:
@@ -277,15 +297,33 @@ def _serialise(batch: Batch) -> dict:
                 "cost_usd": r.cost_usd,
                 "seconds": r.seconds,
                 "verified": r.verified,
+                "straightened": r.straightened,
                 "fields": {
                     key: {
                         "values": f.values,
                         "state": f.state,
                         "reasons": [REASON_TEXT.get(c, c) for c in f.reasons],
+                        "reason_codes": f.reasons,
+                        # הערות רכות — ליד הערך, בלי כתום
+                        "notes": [REASON_TEXT.get(c, c) for c in f.notes],
+                        "note_codes": f.notes,
+                        "extra_values": f.extra_values,
                         "candidates": [c.split(MULTI_SEPARATOR) for c in f.candidates],
                         "readings": f.readings,
                         # האזור שנחתך בפועל — מסומן בריבוע על העמוד המלא
                         "crop_box": list(padded(f.region)) if f.region else None,
+                        "crop_by": f.region_by,
+                        "crop_verified": f.region_verified,
+                        "two_crops": f.two_crops,
+                        "regions": [
+                            {
+                                "model": m,
+                                "box": list(padded(r)),
+                                # רק המיקום הראשי של שופט מאומת (Gemini) נחשב מאומת
+                                "verified": f.region_verified and m == f.region_by,
+                            }
+                            for m, r in f.regions_by_model.items()
+                        ],
                     }
                     for key, f in r.fields.items()
                 },

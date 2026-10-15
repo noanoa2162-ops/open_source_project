@@ -34,6 +34,10 @@ REASON_TEXT = {
     "date_before_issue": "תאריך הקבלה מוקדם מתאריך ההפקה",
     "date_in_future": "תאריך הקבלה בעתיד",
     "date_is_birth": "תאריך הקבלה זהה לתאריך הלידה",
+    "not_on_form": "השדה לא נמצא בטופס — לאשר כריק או למלא",
+    # הערות רכות: מוצגות ליד הערך, בלי כתום
+    "minor_doubt": "ספק קטן — מומלץ לבדוק",
+    "extra_value": "מודל אחד מצא ערך נוסף — מומלץ לבדוק",
 }
 
 
@@ -46,7 +50,8 @@ def validate_record(
 
         if field.is_empty:
             # שדה במחלוקת כבר מסומן עם האפשרויות שלו — "ריק" היה מטעה.
-            if not field.candidates:
+            # שדה ששני השופטים לא מצאו כבר מסומן "לא קיים בטופס".
+            if not field.candidates and "not_on_form" not in field.reasons:
                 field.flag("missing")
             continue
 

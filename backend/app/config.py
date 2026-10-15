@@ -17,7 +17,8 @@ class Settings:
     openai_api_key: str
     gemini_api_key: str
     anthropic_api_key: str
-    # שני השופטים: שני מודלים זולים מחברות שונות, שקוראים כל טופס בנפרד.
+    # הקורא הראשי. JUDGE_B_MODEL ריק = קורא אחד בלבד (ברירת המחדל מאז 15/10/2026).
+    # שופט שני (מחברה אחרת) אפשרי בשורה אחת ב-.env — הקוד שלו נשאר ועובד.
     judge_a_model: str
     judge_b_model: str
     gpt_image_split: int  # 4 = העמוד נשלח ל-GPT בארבעה רבעים; 1 = עמוד שלם
@@ -29,8 +30,11 @@ class Settings:
     max_upload_bytes: int
     max_cost_per_batch_usd: float
     max_parallel_calls: int = 4
-    claude_effort: str = "low"  # low | medium | high — עומק "החשיבה" של Claude
-    enhance_ink: bool = True  # לשלוח גם גרסת "דיו מודגש" של העמוד
+    # עומק החשיבה של Claude: low | medium | high | xhigh | max. ב-Opus 5.5 החשיבה
+    # תמיד פועלת; זה רק קובע כמה עמוק. נועה בחרה high.
+    claude_effort: str = "high"
+    enhance_ink: bool = False  # לשלוח למודל גם גרסת "דיו מודגש" (תמונה שנייה, עולה כסף)
+    straighten_pages: bool = True  # ליישר מקומית דף עקום או על הצד, לפני הקריאה
 
     # תאימות לאחור: הקוד והבדיקות הישנים מכירים את השמות האלה.
     @property
@@ -38,8 +42,12 @@ class Settings:
         return self.openai_api_key
 
     @property
+    def judges(self) -> list[str]:
+        return [m for m in (self.judge_a_model, self.judge_b_model) if m]
+
+    @property
     def model(self) -> str:
-        return f"{self.judge_a_model} + {self.judge_b_model}"
+        return " + ".join(self.judges)
 
     @property
     def has_key(self) -> bool:
@@ -50,6 +58,10 @@ def _int(name: str, default: int) -> int:
     return int(os.environ.get(name) or default)
 
 
+def _flag(name: str, default: str = "1") -> bool:
+    return (os.environ.get(name) or default).strip().lower() not in ("0", "false", "no")
+
+
 def _default_split(judge_b: str) -> int:
     # gpt-4o* מקטין כל תמונה לצד קצר של 768px — לכן רבעים. דגמי gpt-5.4 ומעלה
     # קוראים ברזולוציה המקורית, ועמוד שלם עדיף להם (וזול פי 4).
@@ -57,15 +69,16 @@ def _default_split(judge_b: str) -> int:
 
 
 def load_settings() -> Settings:
-    judge_b = os.environ.get("JUDGE_B_MODEL", "claude-sonnet-5-5").strip()
+    judge_b = os.environ.get("JUDGE_B_MODEL", "").strip()
     return Settings(
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
         gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
-        judge_a_model=os.environ.get("JUDGE_A_MODEL", "gemini-3.8-flash").strip(),
+        judge_a_model=(os.environ.get("JUDGE_A_MODEL") or "claude-opus-5-5").strip(),
         judge_b_model=judge_b,
         gpt_image_split=4 if _int("GPT_IMAGE_SPLIT", _default_split(judge_b)) >= 4 else 1,
-        gemini_thinking_budget=_int("GEMINI_THINKING_BUDGET", 0),
+        # -1 = Gemini מחליט לבד כמה לחשוב, בלי תקרה (רלוונטי רק אם יופעל כשופט).
+        gemini_thinking_budget=_int("GEMINI_THINKING_BUDGET", -1),
         page_render_dpi=_int("PAGE_RENDER_DPI", 300),
         min_image_long_side=_int("MIN_IMAGE_LONG_SIDE", 1500),
         # תקרה לכל הגרירה יחד, לא לכל קובץ: כל עמוד הוא קריאה בתשלום למודל.
@@ -74,11 +87,15 @@ def load_settings() -> Settings:
         ),
         max_files_per_batch=_int("MAX_FILES_PER_BATCH", 25),
         max_upload_bytes=_int("MAX_UPLOAD_BYTES", 40 * 1024 * 1024),
-        max_cost_per_batch_usd=float(os.environ.get("MAX_COST_PER_BATCH_USD") or 1.0),
-        # כמה טפסים מעובדים בו־זמנית. בכל טופס שני השופטים רצים במקביל.
-        max_parallel_calls=max(1, _int("MAX_PARALLEL_CALLS", 4)),
-        claude_effort=(os.environ.get("JUDGE_B_EFFORT") or "low").strip().lower(),
-        enhance_ink=(os.environ.get("ENHANCE_INK") or "1").strip() not in ("0", "false", "no"),
+        # רשת ביטחון נגד תקלה בלבד. 0 = בלי תקרה.
+        max_cost_per_batch_usd=float(os.environ.get("MAX_COST_PER_BATCH_USD") or 10.0),
+        # כמה טפסים מעובדים בו־זמנית. חשיבה עמוקה איטית — לכן יותר במקביל.
+        max_parallel_calls=max(1, _int("MAX_PARALLEL_CALLS", 6)),
+        claude_effort=(
+            os.environ.get("JUDGE_EFFORT") or os.environ.get("JUDGE_B_EFFORT") or "high"
+        ).strip().lower(),
+        enhance_ink=_flag("ENHANCE_INK", "0"),
+        straighten_pages=_flag("STRAIGHTEN_PAGES"),
     )
 
 
@@ -107,6 +124,8 @@ PRICES_PER_MILLION: dict[str, tuple[float, float]] = {
 # מטמון פרומפט: קריאה ~10% ממחיר הקלט, כתיבה ~125% (תוקף 5 דקות).
 CACHE_READ_FACTOR = 0.10
 CACHE_WRITE_FACTOR = 1.25
+# מודלים שבהם מחיר הקריאה מהמטמון שונה מ-10% — דולר למיליון, מהמחירון הרשמי.
+CACHE_READ_PRICE: dict[str, float] = {"claude-opus-5-5": 0.20}
 
 
 def cost_usd(
@@ -120,9 +139,6 @@ def cost_usd(
     price = PRICES_PER_MILLION.get(model)
     if price is None:
         return None
-    input_cost = (
-        input_tokens
-        + cache_read_tokens * CACHE_READ_FACTOR
-        + cache_write_tokens * CACHE_WRITE_FACTOR
-    ) * price[0]
+    input_cost = (input_tokens + cache_write_tokens * CACHE_WRITE_FACTOR) * price[0]
+    input_cost += cache_read_tokens * CACHE_READ_PRICE.get(model, price[0] * CACHE_READ_FACTOR)
     return (input_cost + output_tokens * price[1]) / 1_000_000

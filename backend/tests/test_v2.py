@@ -104,9 +104,19 @@ def test_only_one_judge_finding_a_value_is_orange_with_that_option():
     assert "single_value" in field.reasons
 
 
-def test_both_empty_is_orange_missing():
+def test_both_empty_is_orange_not_on_form():
+    # שניהם חיפשו ולא מצאו — "לא קיים בטופס". עדיין כתום: שדה חובה, אדם מאשר כריק.
     r = record_from(reading("a"), reading("b"))
-    assert "missing" in r.fields["last_name"].reasons
+    field = r.fields["last_name"]
+    assert field.state == STATE_REVIEW
+    assert field.reasons == ["not_on_form"]
+
+
+def test_both_empty_with_illegible_is_not_called_absent():
+    r = record_from(reading("a", legibility={"last_name": "illegible"}), reading("b"))
+    reasons = r.fields["last_name"].reasons
+    assert "not_on_form" not in reasons, "מודל אחד ראה דיו — השדה כן קיים"
+    assert "illegible" in reasons and "missing" in reasons
 
 
 def test_question_mark_is_orange_even_when_both_agree():
@@ -119,9 +129,22 @@ def test_question_mark_is_orange_even_when_both_agree():
     assert "illegible" in field.reasons
 
 
-def test_a_judge_admitting_doubt_makes_agreement_orange():
+def test_agreement_with_partial_is_a_small_doubt_not_orange():
+    # נועה, 15/10/2026: אותה תוצאה משניהם, ואחד אמר "חלקי" → צבע רגיל + "ספק קטן".
     r = record_from(
         reading("a", legibility={"first_name": "partial"}, first_name=["שמואל"]),
+        reading("b", first_name=["שמואל"]),
+    )
+    field = r.fields["first_name"]
+    assert field.values == ["שמואל"]
+    assert field.state == STATE_OK, "לא כתום — אבל גם לא ירוק"
+    assert field.notes == ["minor_doubt"]
+    assert field.reasons == []
+
+
+def test_agreement_with_illegible_stays_orange():
+    r = record_from(
+        reading("a", legibility={"first_name": "illegible"}, first_name=["שמואל"]),
         reading("b", first_name=["שמואל"]),
     )
     assert r.fields["first_name"].state == STATE_REVIEW
@@ -608,7 +631,7 @@ def test_openai_judge_marks_its_locations_unreliable(monkeypatch):
     judge = OpenAIExtractionProvider(api_key="test", model="gpt-5.4-mini")
     empty = FieldReading(values=[], legibility="absent")
     parsed = PageReading(template="x", **{
-        k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "note")
+        k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "upside_down", "note")
     })
     completion = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed, refusal=None, content=""))],
@@ -704,7 +727,7 @@ def _page_reading(**fields):
 
     empty = FieldReading(values=[], legibility="absent")
     reading = PageReading(template="kupah_form", **{
-        k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "note")
+        k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "upside_down", "note")
     })
     for key, value in fields.items():
         setattr(reading, key, value)
@@ -865,6 +888,47 @@ def test_gemini_sends_the_ink_version(tmp_path, monkeypatch, enabled, expected):
     assert len(sent["images"]) == expected
 
 
+class _FakeStream:
+    def __init__(self, response):
+        self.response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self.response
+
+
+def _streaming_client(sent, response=None):
+    """A stand-in Anthropic client: records what was sent, answers like `messages.stream`."""
+    from types import SimpleNamespace
+
+    def stream(**kwargs):
+        sent.update(kwargs)
+        sent["content"] = kwargs["messages"][0]["content"]
+        return _FakeStream(response or _claude_response(_page_reading()))
+
+    return SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)))
+
+
+def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
+    from app.providers import claude_vision as cv
+
+    sent = {}
+    monkeypatch.setattr(cv, "SETTINGS", _settings(enhance_ink=False))
+    judge = cv.ClaudeExtractionProvider(api_key="test", model="claude-opus-5-5")
+    judge._client = _streaming_client(sent, _claude_response(_page_reading(), model="claude-opus-5-5"))
+    raw = judge.extract(_swatches(tmp_path / "page-001.png"))
+    assert sent["model"] == "claude-opus-5-5"
+    assert sent["output_config"] == {"effort": "high"}, "נועה בחרה high"
+    assert sent["max_tokens"] >= 64_000, "החשיבה לא נקטעת באמצע"
+    assert "thinking" not in sent, "ב-Opus 5.5 החשיבה תמיד פועלת; העומק נקבע ב-effort"
+    assert raw.model == "claude-opus-5-5"
+
+
 @pytest.mark.parametrize("enabled, expected", [(True, 2), (False, 1)])
 def test_claude_sends_the_ink_version_first_original_then_ink(tmp_path, monkeypatch, enabled, expected):
     from types import SimpleNamespace
@@ -872,14 +936,9 @@ def test_claude_sends_the_ink_version_first_original_then_ink(tmp_path, monkeypa
     from app.providers import claude_vision as cv
 
     sent = {}
-
-    def parse(**kwargs):
-        sent["content"] = kwargs["messages"][0]["content"]
-        return _claude_response(_page_reading())
-
     monkeypatch.setattr(cv, "SETTINGS", _settings(enhance_ink=enabled))
     judge = cv.ClaudeExtractionProvider(api_key="test")
-    judge._client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(parse=parse)))
+    judge._client = _streaming_client(sent)
     page = _swatches(tmp_path / "page-001.png")
     judge.extract(page)
 
@@ -909,3 +968,405 @@ def test_api_crop_in_ink_view(api):
     assert plain.status_code == ink.status_code == 200
     assert ink.headers["content-type"] == "image/png"
     assert ink.content != plain.content, "גרסה נפרדת, לא אותה תמונה"
+
+
+# ------------------------------------------- 15/10/2026: refinements, zero extra cost
+
+
+def test_question_mark_in_agreement_is_still_orange_even_with_partial():
+    r = record_from(
+        reading("a", legibility={"national_id": "partial"}, national_id=["0011?2334"]),
+        reading("b", legibility={"national_id": "partial"}, national_id=["0011?2334"]),
+    )
+    assert r.fields["national_id"].state == STATE_REVIEW
+
+
+def test_extra_value_from_one_judge_keeps_the_shared_value():
+    # הדוגמה של נועה: Gemini ‏11223344 | 986547213, Claude ‏11223344 → 11223344 + הודעה.
+    r = record_from(
+        reading("gemini", commitment_numbers=["11223344", "986547213"]),
+        reading("claude", commitment_numbers=["11223344"]),
+    )
+    field = r.fields["commitment_numbers"]
+    assert field.values == ["11223344"]
+    assert field.extra_values == ["986547213"], "הערך הנוסף לא נעלם — מוצע בלחיצה"
+    assert field.notes == ["extra_value"]
+    assert field.state == STATE_OK
+    assert field.candidates == []
+
+
+def test_partial_overlap_is_still_a_disagreement():
+    r = record_from(
+        reading("gemini", commitment_numbers=["111", "222"]),
+        reading("claude", commitment_numbers=["111", "333"]),
+    )
+    field = r.fields["commitment_numbers"]
+    assert field.values == [] and "readers_disagree" in field.reasons
+
+
+def test_one_empty_judge_is_not_an_extra_value_case():
+    r = record_from(reading("gemini", commitment_numbers=["111"]), reading("claude"))
+    assert "single_value" in r.fields["commitment_numbers"].reasons
+
+
+def _claude(**kw):
+    raw = reading("claude-sonnet-5-5", **kw)
+    raw.regions_reliable = False
+    raw.regions_fallback = True
+    return raw
+
+
+def test_claude_location_is_a_labelled_fallback_when_gemini_has_none():
+    gemini = reading("gemini-3.8-flash", sending_entity=["מכבי"])
+    claude = _claude(regions={"sending_entity": (0.6, 0.02, 0.9, 0.08)}, sending_entity=["מכבי"])
+    field = record_from(gemini, claude).fields["sending_entity"]
+    assert field.region == (0.6, 0.02, 0.9, 0.08)
+    assert field.region_by == "claude-sonnet-5-5"
+    assert field.region_verified is False, "המסך מציין 'מיקום לא אומת'"
+
+
+def test_gemini_location_stays_primary_when_both_have_one():
+    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
+                     national_id=["001122334"])
+    claude = _claude(regions={"national_id": (0.6, 0.1, 0.8, 0.12)}, national_id=["001122334"])
+    field = record_from(gemini, claude).fields["national_id"]
+    assert field.region == (0.1, 0.5, 0.3, 0.52) and field.region_verified is True
+    assert field.two_crops is False, "הסכמה — תקריב אחד"
+
+
+def test_very_different_readings_get_a_crop_from_each_judge():
+    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
+                     national_id=["001122334"])
+    claude = _claude(regions={"national_id": (0.12, 0.5, 0.32, 0.52)}, national_id=["987650000"])
+    field = record_from(gemini, claude).fields["national_id"]
+    assert field.two_crops is True
+    assert set(field.regions_by_model) == {"gemini-3.8-flash", "claude-sonnet-5-5"}
+
+
+def test_similar_readings_in_the_same_place_get_one_crop():
+    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
+                     national_id=["001122334"])
+    claude = _claude(regions={"national_id": (0.11, 0.5, 0.31, 0.52)}, national_id=["001122384"])
+    field = record_from(gemini, claude).fields["national_id"]
+    assert "readers_disagree" in field.reasons
+    assert field.two_crops is False
+
+
+def test_similar_readings_in_different_places_get_two_crops():
+    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
+                     national_id=["001122334"])
+    claude = _claude(regions={"national_id": (0.6, 0.1, 0.8, 0.12)}, national_id=["001122384"])
+    assert record_from(gemini, claude).fields["national_id"].two_crops is True
+
+
+def test_gpt_locations_are_never_a_fallback():
+    gemini = reading("gemini-3.8-flash", national_id=["001122334"])
+    gpt = reading("gpt-5.4-mini", regions={"national_id": (0.6, 0.1, 0.8, 0.12)},
+                  national_id=["001122334"])
+    gpt.regions_reliable = False
+    field = record_from(gemini, gpt).fields["national_id"]
+    assert field.region is None and field.regions_by_model == {}
+
+
+def test_upside_down_needs_both_judges():
+    a, b = reading("a"), reading("b")
+    a.upside_down = True
+    assert record_from(a, b).upside_down is False
+    b.upside_down = True
+    assert record_from(a, b).upside_down is True
+
+
+def test_show_upright_turns_the_page_and_every_box(tmp_path):
+    page = tmp_path / "page-001.png"
+    image = Image.new("RGB", (100, 200), "white")
+    image.putpixel((0, 0), (255, 0, 0))
+    image.save(page)
+    record = record_from(
+        reading("gemini", regions={"national_id": (0.1, 0.2, 0.3, 0.4)}, national_id=["1"]),
+        reading("b", national_id=["1"]),
+    )
+    pipeline.show_upright(record, page)
+    with Image.open(page) as turned:
+        assert turned.getpixel((99, 199)) == (255, 0, 0)
+    region = record.fields["national_id"].region
+    assert region == pytest.approx((0.7, 0.6, 0.9, 0.8))
+    assert record.fields["national_id"].regions_by_model["gemini"] == pytest.approx(region)
+    assert "הפוך" in record.straightened
+
+
+@pytest.mark.parametrize("printed, expected", [
+    ("מרכז רפואי מאיר", "מאיר"),
+    ("המרכז הרפואי האוניברסיטאי סורוקה", "סורוקה"),
+    ("מרכז רפואי צאנז", "לניאדו"),
+    ("בית חולים אלישע", "אלישע"),
+    ('קופ"ח לאומית', "לאומית"),
+    ("שמיר (אסף הרופא)", "שמיר (אסף הרופא)"),
+])
+def test_closed_list_maps_printed_names(printed, expected):
+    assert canonical_sender(printed) == expected
+
+
+@pytest.mark.parametrize("ambiguous", ["האיטלקי", "אסותא", "מרפאת השרון"])
+def test_ambiguous_names_stay_unknown(ambiguous):
+    assert canonical_sender(ambiguous) is None, "שם של כמה מוסדות — נשאר כתום, לא מנוחש"
+
+
+def test_prompt_carries_the_closed_list_and_upside_down():
+    from app.providers.reading import load_prompt
+
+    text = load_prompt("x")
+    assert "רשימת הגורמים השולחים המוכרים" in text
+    assert "- שערי צדק" in text
+    assert "upside_down" in text
+
+
+def _lines_page(size=(1240, 1754)) -> Image.Image:
+    from PIL import ImageDraw
+
+    page = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(page)
+    for y in range(120, size[1] - 100, 46):
+        x = 100
+        while x < size[0] - 140:
+            width = 40 + (x * 7 + y) % 90
+            draw.rectangle([x, y, min(x + width, size[0] - 100), y + 14], fill=(20, 20, 20))
+            x += width + 18
+    return page
+
+
+def test_straight_page_is_left_alone():
+    from app.pages import straighten
+
+    page = _lines_page()
+    fixed, note = straighten(page)
+    assert note == "" and fixed is page
+
+
+def test_tilted_page_is_levelled():
+    from app.pages import _ink_mask, _skew_angle, straighten
+
+    fixed, note = straighten(_lines_page().rotate(5, expand=True, fillcolor="white"))
+    assert "יושר" in note
+    assert _skew_angle(_ink_mask(fixed)) == 0.0, "אחרי היישור לא נשארת הטיה"
+
+
+def test_small_tilt_is_not_worth_touching():
+    from app.pages import straighten
+
+    _, note = straighten(_lines_page().rotate(1, expand=True, fillcolor="white"))
+    assert note == ""
+
+
+def test_page_on_its_side_is_turned_upright():
+    from app.pages import straighten
+
+    fixed, note = straighten(_lines_page().rotate(90, expand=True))
+    assert "90" in note
+    assert fixed.height > fixed.width
+
+
+def test_render_writes_the_turn_note(tmp_path):
+    from app.pages import render_pages, turn_note
+
+    source = tmp_path / "photo.png"
+    _lines_page().rotate(6, expand=True, fillcolor="white").save(source)
+    written, _ = render_pages(source, tmp_path / "pages")
+    assert "יושר" in turn_note(written[0])
+
+
+def test_soft_notes_are_not_orange_in_excel_but_are_written():
+    import io
+
+    record = record_from(
+        reading("a", legibility={"first_name": "partial"}, first_name=["שמואל"],
+                commitment_numbers=["111", "222"]),
+        reading("b", first_name=["שמואל"], commitment_numbers=["111"]),
+    )
+    batch = Batch(batch_id="b", sources=[SOURCE], records=[record])
+    ws = load_workbook(io.BytesIO(workbook_bytes(batch))).active
+    headers = [c.value for c in ws[1]]
+    first = ws.cell(row=2, column=headers.index("שם פרטי") + 1)
+    assert first.value == "שמואל"
+    assert first.fill.fill_type is None, "ספק קטן — לא כתום"
+    reasons = ws.cell(row=2, column=headers.index("סיבות") + 1).value
+    assert "ספק קטן" in reasons and "222" in reasons
+
+
+def test_api_crop_per_judge_and_unknown_judge(api):
+    client, record = api
+    field = record.fields["national_id"]
+    field.regions_by_model = {"a": (0.4, 0.4, 0.6, 0.45), "claude-sonnet-5-5": (0.1, 0.1, 0.3, 0.15)}
+    base = "/api/batches/bat_api/sources/1/pages/1/crops/national_id"
+    assert client.get(base + "?by=claude-sonnet-5-5").status_code == 200
+    assert client.get(base + "?by=claude-sonnet-5-5&ink=1").status_code == 200
+    assert client.get(base + "?by=nobody").status_code == 404, "אין מיקום — לא ממציאים תקריב"
+    served = client.get("/api/batches/bat_api").json()["records"][0]["fields"]["national_id"]
+    assert {r["model"]: r["verified"] for r in served["regions"]} == {
+        "a": True, "claude-sonnet-5-5": False,
+    }
+
+
+def test_api_add_extra_value_and_approve_empty_clear_the_remarks(api):
+    client, record = api
+    field = record.fields["commitment_numbers"]
+    field.values, field.extra_values, field.notes = ["111"], ["222"], ["extra_value"]
+    body = client.patch(f"/api/records/{record.record_id}",
+                        json={"field": "commitment_numbers", "values": ["111", "222"]}).json()
+    served = body["records"][0]["fields"]["commitment_numbers"]
+    assert served["values"] == ["111", "222"] and served["state"] == STATE_APPROVED
+    assert served["notes"] == [] and served["extra_values"] == []
+
+    empty = record.fields["central_numbers"]
+    assert empty.reasons == ["not_on_form"]
+    body = client.patch(f"/api/records/{record.record_id}",
+                        json={"field": "central_numbers", "approve": True}).json()
+    served = body["records"][0]["fields"]["central_numbers"]
+    assert served["state"] == STATE_APPROVED and served["values"] == []
+
+
+# ------------------------------------- 15/10/2026: one strong reader (Claude Opus 5.5)
+
+
+def one_reader(*readings_):
+    record = FormRecord.empty("b", SOURCE, 1)
+    combine(record, list(readings_), flag_single_reader=False)
+    validate_record(record, today=date(2026, 10, 14))
+    return record
+
+
+def test_single_reader_sure_value_keeps_its_normal_colour():
+    r = one_reader(reading("claude-opus-5-5", commitment_numbers=["730578626"]))
+    field = r.fields["commitment_numbers"]
+    assert field.values == ["730578626"] and field.state == STATE_OK
+    assert "single_reader" not in field.reasons, "קורא אחד במכוון אינו תקלה"
+
+
+@pytest.mark.parametrize("level, value", [("partial", "730578626"), ("clear", "7305?8626")])
+def test_single_reader_any_doubt_is_orange(level, value):
+    r = one_reader(reading("claude-opus-5-5", legibility={"commitment_numbers": level},
+                           commitment_numbers=[value]))
+    field = r.fields["commitment_numbers"]
+    assert field.values == [value], "מה שנקרא נשאר גלוי"
+    assert field.state == STATE_REVIEW
+
+
+def test_single_reader_illegible_is_orange_and_empty():
+    r = one_reader(reading("claude-opus-5-5", legibility={"first_name": "illegible"}))
+    assert r.fields["first_name"].state == STATE_REVIEW
+    assert "not_on_form" not in r.fields["first_name"].reasons
+
+
+def test_single_reader_absent_is_not_on_form():
+    r = one_reader(reading("claude-opus-5-5", legibility={"central_numbers": "absent"}))
+    assert r.fields["central_numbers"].reasons == ["not_on_form"]
+    assert r.fields["central_numbers"].state == STATE_REVIEW
+
+
+def test_single_reader_keeps_every_value_and_local_rules_still_run():
+    r = one_reader(reading("claude-opus-5-5", commitment_numbers=["111", "222"],
+                           national_id=["0011223344"]))
+    assert r.fields["commitment_numbers"].values == ["111", "222"]
+    assert "id_length" in r.fields["national_id"].reasons, "הבדיקות המקומיות רצות גם עם קורא אחד"
+
+
+def test_default_setup_is_one_opus_reader(monkeypatch):
+    from app.config import load_settings
+
+    for name in ("JUDGE_A_MODEL", "JUDGE_B_MODEL", "JUDGE_EFFORT", "JUDGE_B_EFFORT",
+                 "ENHANCE_INK", "MAX_COST_PER_BATCH_USD"):
+        monkeypatch.delenv(name, raising=False)
+    s = load_settings()
+    assert s.judges == ["claude-opus-5-5"]
+    assert s.claude_effort == "high"
+    assert s.enhance_ink is False
+    assert s.max_cost_per_batch_usd == 10.0
+
+
+def test_second_judge_is_one_line_in_env(monkeypatch):
+    from app.config import load_settings
+
+    monkeypatch.setenv("JUDGE_B_MODEL", "gemini-3.8-flash")
+    assert load_settings().judges == ["claude-opus-5-5", "gemini-3.8-flash"]
+
+
+def test_build_judges_picks_the_adapter_by_model_name(monkeypatch):
+    from app.providers.claude_vision import ClaudeExtractionProvider
+    from app.providers.gemini_vision import GeminiExtractionProvider
+
+    monkeypatch.setattr(pipeline, "SETTINGS", _settings(
+        judge_a_model="claude-opus-5-5", judge_b_model="", anthropic_api_key="k"))
+    judges, problems = pipeline.build_judges()
+    assert problems == [] and [type(j) for j in judges] == [ClaudeExtractionProvider]
+    assert judges[0].model == "claude-opus-5-5"
+
+    monkeypatch.setattr(pipeline, "SETTINGS", _settings(
+        judge_a_model="claude-opus-5-5", judge_b_model="gemini-3.8-flash",
+        anthropic_api_key="k", gemini_api_key="g"))
+    judges, _ = pipeline.build_judges()
+    assert [type(j) for j in judges] == [ClaudeExtractionProvider, GeminiExtractionProvider]
+
+
+def test_batch_with_one_configured_reader_has_no_single_reader_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
+    monkeypatch.setattr(pipeline, "SETTINGS", _settings(judge_a_model="claude-opus-5-5", judge_b_model=""))
+    judge = Judge("claude-opus-5-5", reading("claude-opus-5-5", commitment_numbers=["730578626"]))
+    monkeypatch.setattr(pipeline, "build_judges", lambda: ([judge], []))
+    batch = Batch(batch_id="bat_one")
+    source = SourceFile(index=1, filename="f.png", kind="png", sha256="")
+    batch.sources.append(source)
+    store.put(batch)
+    png(store.source_dir("bat_one", 1) / "source", size=(1000, 1400))
+    pipeline._process("bat_one")
+    record = batch.records[0]
+    assert record.fields["commitment_numbers"].state == STATE_OK
+    assert all("single_reader" not in f.reasons for f in record.fields.values())
+    assert not batch.warnings
+    store.delete("bat_one")
+
+
+def test_prompt_v3_carries_the_challenge_rules():
+    from app.providers.reading import PROMPT_NAME, load_prompt
+
+    text = load_prompt("x")
+    assert PROMPT_NAME == "extract_v3"
+    for rule in ("שדה שלא נמצא נשאר ריק — לא מנוחש", "שומרים את כולם", '"דגימה"',
+                 '"דרישה"', "התקבל", "רשימת הגורמים השולחים המוכרים", "העמוד הזה עומד לבד"):
+        assert rule in text, rule
+
+
+def test_opus_cache_reads_are_priced_at_its_own_rate():
+    from app.config import cost_usd
+
+    # 1M מהמטמון ב-Opus 5.5 = $0.20 (לא 10% מ-$4)
+    assert cost_usd("claude-opus-5-5", 0, 0, cache_read_tokens=1_000_000) == pytest.approx(0.20)
+    assert cost_usd("claude-sonnet-5-5", 0, 0, cache_read_tokens=1_000_000) == pytest.approx(0.20)
+    assert cost_usd("claude-opus-5-5", 1_000_000, 1_000_000) == pytest.approx(24.0)
+
+
+def test_zero_budget_cap_means_no_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
+    monkeypatch.setattr(pipeline, "SETTINGS", _settings(max_cost_per_batch_usd=0.0))
+    judge = Judge("claude-opus-5-5", reading("claude-opus-5-5"))
+    batch = Batch(batch_id="bat_cap")
+    pages = []
+    for page in (1, 2):
+        source = SourceFile(index=page, filename=f"{page}.png", kind="png", sha256="")
+        batch.sources.append(source)
+        pages.append((source, 1, png(tmp_path / f"p{page}.png")))
+    results = pipeline._extract_all(Panel([judge]), batch, pages)
+    assert all(r is not None for r in results) and batch.budget_skipped_pages == 0
+
+
+
+def test_prompt_lets_the_reader_recognise_cursive_names_but_flags_them():
+    # 15/10/2026: "אל תזהה צורה של מילה" חסם את קריאת השם הרהוט. מותר לזהות מילה — וזה כתום.
+    from app.providers.reading import load_prompt
+
+    text = load_prompt("x")
+    assert "אל תזהה \"צורה של מילה\"" not in text
+    assert "אסור להשלים שם \"סביר\"" not in text
+    assert "מזהים את המילה כולה" in text
+    assert "כתב רהוט כמעט תמיד = `partial`" in text
+    # ספרות נשארות קשוחות
+    assert "ספרה שאינך קורא בוודאות → `?` במקומה" in text
+    assert "ספרות שמתבלבלות בכתב יד: 1/7" in text

@@ -1,9 +1,10 @@
-"""Uploads → pages → two independent judges → comparison → validated records.
+"""Uploads → pages → the reader (or two judges) → validated records.
 
 A batch is one drop, however many files it contained. Every file is flattened
-into pages and every page becomes one record. Each page is read by both judges
-at the same time; `consensus.combine` fills only what they agree on, and
-everything else goes to the secretary as orange "לא ברור" with both readings.
+into pages and every page becomes one record. By default one strong model
+(Claude Opus, deep thinking) reads each page on its own; whatever it is unsure
+of goes to the secretary as orange. With a second judge configured in .env,
+both read every page and `consensus.combine` fills only what they agree on.
 
 Runs on a worker thread so the browser gets an immediate response and can poll
 for progress. One page failing never stops the rest; one judge failing never
@@ -22,8 +23,8 @@ from PIL import Image
 
 from app.config import SETTINGS
 from app.consensus import combine
-from app.models import Batch, FormRecord, SourceFile
-from app.pages import render_pages
+from app.models import Batch, FormRecord, Region, SourceFile
+from app.pages import render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
 from app.providers.reading import PROMPT_VERSION
 from app.store import get, source_dir
@@ -37,30 +38,36 @@ _CACHE_LOCK = threading.Lock()
 
 
 def build_judges() -> tuple[list[ExtractionProvider], list[str]]:
-    """The judges available right now, and a visible reason for any that is not."""
-    from app.providers.gemini_vision import GeminiExtractionProvider
-
+    """The readers configured in .env, and a visible reason for any that is not available."""
     judges: list[ExtractionProvider] = []
     problems: list[str] = []
-    for make in (GeminiExtractionProvider, judge_b_class()):
+    for model in SETTINGS.judges:
         try:
-            judges.append(make())
+            judges.append(judge_class(model)(model=model))
         except ExtractionError as exc:
             problems.append(str(exc))
     return judges, problems
 
 
-def judge_b_class(model: str | None = None):
-    """The second judge's adapter, chosen by model name — so switching between
-    Claude and GPT is one line in .env (JUDGE_B_MODEL)."""
-    name = (model or SETTINGS.judge_b_model).lower()
+def judge_class(model: str):
+    """The adapter for a model, chosen by its name — so switching models is one line in .env."""
+    name = model.lower()
     if name.startswith("claude"):
         from app.providers.claude_vision import ClaudeExtractionProvider
 
         return ClaudeExtractionProvider
+    if name.startswith(("gemini", "gemma")):
+        from app.providers.gemini_vision import GeminiExtractionProvider
+
+        return GeminiExtractionProvider
     from app.providers.openai_vision import OpenAIExtractionProvider
 
     return OpenAIExtractionProvider
+
+
+def judge_b_class(model: str | None = None):
+    """Kept for the evaluation tool: the adapter of the second judge slot."""
+    return judge_class(model or SETTINGS.judge_b_model or SETTINGS.judge_a_model)
 
 
 class Panel:
@@ -68,8 +75,10 @@ class Panel:
     credit, bad key) is retired for the rest of the batch, so it stops burning
     calls, and the remaining judge carries on."""
 
-    def __init__(self, judges: list[ExtractionProvider]) -> None:
+    def __init__(self, judges: list[ExtractionProvider], expected: int | None = None) -> None:
         self.judges = judges
+        # כמה קוראים הוגדרו. קורא אחד במכוון אינו תקלה; אחד משניים — כן.
+        self.expected = len(judges) if expected is None else expected
         self.retired: dict[str, str] = {}
         self._lock = threading.Lock()
 
@@ -123,11 +132,12 @@ def _process(batch_id: str) -> None:
         batch.status = "failed"
         batch.error = " ".join(problems) or "אין שופט זמין."
         return
-    if len(judges) == 1:
+    expected = len(SETTINGS.judges)
+    if expected > 1 and len(judges) == 1:
         batch.warn("רק קורא אחד זמין — כל השדות יסומנו לבדיקה.")
 
-    # שלב 2: כמה טפסים במקביל, ובכל טופס שני השופטים במקביל.
-    panel = Panel(judges)
+    # שלב 2: כמה טפסים במקביל (ואם הוגדרו שני שופטים — שניהם במקביל בכל טופס).
+    panel = Panel(judges, expected=expected)
     results = _extract_all(panel, batch, pages)
     batch.records.extend(record for record in results if record is not None)
     batch.seconds = round(time.perf_counter() - started, 1)
@@ -158,10 +168,16 @@ def _extract_all(panel: Panel, batch: Batch, pages: list[Page]) -> list[FormReco
         if stop.is_set() or panel.exhausted:
             return index, None, "stopped"
         with spent_lock:
-            if spent[0] >= SETTINGS.max_cost_per_batch_usd:
+            cap = SETTINGS.max_cost_per_batch_usd  # 0 = בלי תקרה
+            if cap > 0 and spent[0] >= cap:
                 return index, None, "budget"
         source, page_number, image_path = pages[index]
-        record = read_form(panel, image_path, batch.batch_id, source, page_number)
+        record = read_form(
+            panel, image_path, batch.batch_id, source, page_number,
+            flag_single_reader=panel.expected > 1,
+        )
+        if record.upside_down:
+            show_upright(record, image_path)
         with spent_lock:
             spent[0] += record.cost_usd or 0.0
         if panel.exhausted:
@@ -201,6 +217,7 @@ def read_form(
     started = time.perf_counter()
     record = FormRecord.empty(batch_id, source, page_number)
     record.low_resolution = _is_low_resolution(image_path)
+    record.straightened = turn_note(image_path)
 
     judges = panel.active()
     readings: list[RawExtraction | None] = [None] * len(judges)
@@ -235,6 +252,27 @@ def read_form(
         record.model_note = " · ".join(filter(None, [record.model_note, *failures]))
     validate_record(record)
     return record
+
+
+def show_upright(record: FormRecord, image_path: Path) -> None:
+    """Both judges said the page is upside down: turn the stored page 180° so
+    the secretary sees it the right way up, and move every box with it.
+
+    The page is not sent again — that would double the cost. What the judges
+    read stays as it is, with its own doubts, and the row says what happened.
+    """
+    turn_upside_down(image_path)
+    for field in record.fields.values():
+        if field.region:
+            field.region = _turned(field.region)
+        field.regions_by_model = {m: _turned(r) for m, r in field.regions_by_model.items()}
+    note = "הדף הגיע הפוך — סובב לתצוגה. הקריאה נעשתה על הדף ההפוך, מומלץ לבדוק"
+    record.straightened = " · ".join(filter(None, [record.straightened, note]))
+
+
+def _turned(region: Region) -> Region:
+    x0, y0, x1, y1 = region
+    return (1 - x1, 1 - y1, 1 - x0, 1 - y0)
 
 
 def _read(

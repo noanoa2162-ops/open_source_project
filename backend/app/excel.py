@@ -14,7 +14,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.fields import FIELDS, MULTI_SEPARATOR
-from app.models import STATE_REVIEW, Batch, FormRecord
+from app.models import STATE_APPROVED, STATE_REVIEW, Batch, FormRecord
 from app.validators import REASON_TEXT
 
 # נוסחאות: ערך שמתחיל באחד מאלה ייכתב כטקסט מנוטרל ולא ירוץ כנוסחה.
@@ -44,6 +44,16 @@ def record_row(record: FormRecord) -> list[str]:
         if f.candidates:
             label = next(s.label_he for s in FIELDS if s.key == f.key)
             reasons.append(f"{label}: " + " / ".join(f.candidates))
+    # הערות רכות: התא לא כתום ולא נספר לבדיקה, אבל ההערה גלויה גם באקסל.
+    for spec in FIELDS:
+        f = record.fields[spec.key]
+        if f.state == STATE_APPROVED:
+            continue
+        for code in f.notes:
+            if code == "extra_value" and f.extra_values:
+                reasons.append(f"{spec.label_he}: מודל אחד מצא גם " + " / ".join(f.extra_values))
+            else:
+                reasons.append(f"{spec.label_he}: {REASON_TEXT.get(code, code)}")
     return [
         *cells,
         record.source_name,

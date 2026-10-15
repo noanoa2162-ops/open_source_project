@@ -97,6 +97,17 @@ td.cell:hover .zoom,.zoom:focus-visible{opacity:1;background:none}
   border:1px solid var(--amber-line);background:#fff;color:var(--ink);cursor:pointer}
 .cand:hover{border-color:var(--amber);background:#fff8ee}
 mark.q{background:#ffd27a;color:#6b3a00;border-radius:2px;padding:0 2px;font-weight:700}
+/* הערה רכה: ספק קטן / ערך נוסף. התא לא כתום — רק שורה קטנה מתחת לערך */
+td .soft{display:block;font-size:11.5px;font-weight:400;color:#2f5f86;margin-top:3px}
+td .soft::before{content:"ⓘ ";color:var(--teal)}
+.addx,.okempty{font:inherit;font-size:11.5px;padding:2px 8px;margin-top:4px;border-radius:5px;
+  border:1px solid #b8d3e6;background:#f3f9fd;color:var(--navy);cursor:pointer}
+.addx:hover,.okempty:hover{border-color:var(--teal);background:#e6f4f4}
+.pv-box.b2{border-color:#7b61ff;box-shadow:none}
+.pv-lbl .src{display:inline-block;width:10px;height:10px;border-radius:2px;margin-inline-end:5px;
+  vertical-align:middle;border:2px solid #ff9f1a}
+.pv-lbl .src.b2{border-color:#7b61ff}
+.pv-lbl .unv{color:#ffcf8a}
 .ink-toggle{font-size:11.5px;padding:2px 9px;margin-inline-start:8px;border-radius:5px;
   background:#2a3d4d;color:#cfe0ee;border:1px solid #50667a}
 .ink-toggle.on{background:#1a8f8f;color:#fff;border-color:#1a8f8f}
@@ -170,7 +181,7 @@ td.acts{white-space:nowrap;text-align:center}
       <span id="pCount"></span>
     </div>
     <div class="bar"><div id="pFill"></div></div>
-    <span class="sub">כל טופס נקרא על ידי שני קוראים בלתי תלויים. מה שהם לא מסכימים עליו — יסומן לבדיקה.</span>
+    <span class="sub" id="pHow">כל טופס נקרא בנפרד. כל שדה שהמנוע לא בטוח בו — יסומן לבדיקה.</span>
     <ul id="pFiles"></ul>
   </div>
 
@@ -202,9 +213,10 @@ td.acts{white-space:nowrap;text-align:center}
     </div>
 
     <div class="foot">
-      ערך מוצג רק כששני הקוראים הסכימו עליו. תאים <b style="color:var(--amber)">כתומים</b> דורשים
-      בדיקה — בחרו אפשרות או תקנו. לחיצה על תא מציגה את הטופס ואת ההגדלה של השדה;
-      לחיצה כפולה פותחת עריכה. <b style="color:var(--ok)">ירוק</b> = נבדק על ידי אדם.<br>
+      <span id="footHow">תאים <b style="color:var(--amber)">כתומים</b> = המנוע לא בטוח, או שבדיקה אוטומטית
+      נכשלה (ת"ז, תאריך, גורם שולח) — תקנו או אשרו.</span> לחיצה על תא מציגה את הטופס ואת ההגדלה
+      של השדה; לחיצה כפולה פותחת עריכה. <b style="color:var(--ok)">ירוק</b> = נבדק על ידי אדם.
+      תא רגיל אינו טענת נכונות — רק שהמנוע לא סימן ספק.<br>
       דמו להאקתון, מיועד לטפסי הדוגמה. אין כאן טענת דיוק ואין להסתמך על הפלט ללא בדיקה.
     </div>
   </div>
@@ -215,18 +227,31 @@ const $ = s => document.querySelector(s);
 let FIELDS = [], batch = null, timer = null, last = null;
 let selected = null;  // { rec, key } — key ריק = נבחרה שורה, לא שדה
 
+let JUDGES = [];  // הקוראים שהוגדרו. אחד = מצב ברירת המחדל; שניים = השוואה בין שופטים
+
 fetch('/api/config').then(r => r.json()).then(c => {
   FIELDS = c.fields;
-  const judges = (c.judges || []).join(' + ');
-  $('#modelName').textContent = judges;
+  JUDGES = c.judges || [];
+  const judges = JUDGES.join(' + ');
+  const effort = c.effort ? ' · חשיבה ' + c.effort : '';
+  $('#modelName').textContent = judges + effort;
   $('#limits').textContent =
     'PDF, JPG או PNG · עד ' + c.max_files + ' קבצים ו-' + c.max_pages +
-    ' טפסים בגרירה אחת · שני קוראים: ' + judges;
+    ' טפסים בגרירה אחת · ' + (JUDGES.length > 1 ? 'שני קוראים: ' : 'קורא: ') + judges + effort;
+  if (JUDGES.length > 1) {
+    $('#pHow').textContent =
+      'כל טופס נקרא על ידי שני קוראים בלתי תלויים. מה שהם לא מסכימים עליו — יסומן לבדיקה.';
+    $('#footHow').innerHTML = 'ערך מוצג רק כששני הקוראים הסכימו עליו. תאים ' +
+      '<b style="color:var(--amber)">כתומים</b> דורשים בדיקה — בחרו אפשרות או תקנו. ' +
+      'ⓘ הערה קטנה בתא רגיל = שני הקוראים הסכימו, אבל יש ספק קטן — מומלץ להציץ.';
+  }
+  // השוואת מודלים רלוונטית רק כשיש שני קוראים.
+  $('#compare').classList.toggle('hidden', JUDGES.length < 2);
   $('#head').innerHTML =
     FIELDS.map(f => '<th title="' + esc(f.hint) + '">' + esc(f.label) + '</th>').join('') +
     '<th>קובץ מקור</th><th>עמוד</th><th>בדיקה</th>';
   if (!c.has_key) notice('err', 'אין מפתחות API',
-    'לא נמצאו OPENAI_API_KEY או GEMINI_API_KEY בקובץ .env. הוסיפו והפעילו מחדש את השרת.');
+    'לא נמצא מפתח API בקובץ .env (למשל ANTHROPIC_API_KEY). הוסיפו והפעילו מחדש את השרת.');
 });
 
 function money(usd){
@@ -340,7 +365,8 @@ async function tick(){
       notice('warn', 'נחצתה תקרת הטפסים',
         d.skipped_pages + ' טפסים לא עובדו. עובדו ' + total +
         ' הראשונים. ניתן לשנות את MAX_PAGES_PER_BATCH בקובץ .env.');
-    const single = d.records.filter(function(r){
+    // הבאנר האדום רק כשהוגדרו שני שופטים ואחד מהם לא קרא. קורא אחד במכוון אינו תקלה.
+    const single = JUDGES.length < 2 ? 0 : d.records.filter(function(r){
       return !r.error && (r.readers || []).length < 2;
     }).length;
     if (single)
@@ -371,6 +397,7 @@ function render(d){
     const notes = [];
     if (r.low_resolution)
       notes.push('רזולוציה נמוכה — כתב יד עלול לא להיקרא. מומלץ להעלות את הסריקה המקורית, לא צילום מסך.');
+    if (r.straightened) notes.push(r.straightened);
     if (r.error) notes.push('הקריאה נכשלה: ' + r.error);
     else if (r.note) notes.push('הערה: ' + r.note);
     const noteRow = notes.length
@@ -393,7 +420,11 @@ function render(d){
     td.onclick = function(){ showField(td.dataset.rec, td.dataset.key); };
     td.ondblclick = function(e){ e.stopPropagation(); edit(td); };
   });
-  $('#body').querySelectorAll('.cand').forEach(function(b){
+  $('#body').querySelectorAll('.okempty').forEach(function(b){
+    b.onclick = function(e){ e.stopPropagation(); approveEmpty(b.dataset.rec, b.dataset.key); };
+    b.ondblclick = function(e){ e.stopPropagation(); };
+  });
+  $('#body').querySelectorAll('.cand, .addx').forEach(function(b){
     b.onclick = function(e){
       e.stopPropagation();
       choose(b.dataset.rec, b.dataset.key, JSON.parse(b.dataset.values));
@@ -455,9 +486,12 @@ function cell(record, spec){
   const f = record.fields[spec.key];
   const cls = f.state === 'needs_review' ? 'review'
             : f.state === 'approved' ? 'approved' : '';
+  const codes = f.reason_codes || [];
+  const notOnForm = codes.indexOf('not_on_form') !== -1;
   let text;
   if (f.values.length) text = markUnreadable(f.values.join(' | '));
   else if (f.candidates && f.candidates.length) text = '<span class="empty">לא ברור</span>';
+  else if (notOnForm) text = '<span class="empty">לא קיים בטופס</span>';
   else text = '<span class="empty">לא נמצא</span>';
 
   const options = (f.candidates || []).map(function(values){
@@ -469,11 +503,34 @@ function cell(record, spec){
   const why = (f.state === 'needs_review' && f.reasons.length)
     ? '<span class="why">' + esc(f.reasons[0]) + '</span>' : '';
 
+  // הערות רכות: ספק קטן, או ערך שרק מודל אחד מצא. התא נשאר בצבע רגיל.
+  let soft = '';
+  if (f.state !== 'approved') {
+    (f.note_codes || []).forEach(function(code, i){
+      if (code === 'extra_value' && (f.extra_values || []).length) {
+        soft += '<span class="soft">מודל אחד מצא גם ' + markUnreadable(f.extra_values.join(' | ')) +
+          ' — מומלץ לבדוק</span>';
+        f.extra_values.forEach(function(x){
+          soft += '<button class="addx" title="להוסיף את הערך הזה לשדה" data-rec="' + record.record_id +
+            '" data-key="' + spec.key + '" data-values="' +
+            esc(JSON.stringify(f.values.concat([x]))) + '">הוסף גם ' + markUnreadable(x) + '</button> ';
+        });
+      } else {
+        soft += '<span class="soft">' + esc((f.notes || [])[i] || '') + '</span>';
+      }
+    });
+  }
+  // שדה ריק שאין בו מה לבחור: לחיצה אחת מאשרת אותו כריק.
+  const okEmpty = (f.state === 'needs_review' && !f.values.length && !(f.candidates || []).length)
+    ? '<button class="okempty" title="אישור שהשדה באמת ריק בטופס" data-rec="' + record.record_id +
+      '" data-key="' + spec.key + '">אשר כריק</button>' : '';
+
   return '<td class="cell ' + cls + '" data-key="' + spec.key + '" data-rec="' +
     record.record_id + '" data-raw="' + esc(f.values.join(' | ')) +
     '" title="לחיצה: הצגת המקור · לחיצה כפולה: עריכה">' +
     '<button class="zoom" tabindex="-1" aria-hidden="true">🔍</button>' +
-    text + (options ? '<div class="cands">' + options + '</div>' : '') + why + reads + '</td>';
+    text + (options ? '<div class="cands">' + options + '</div>' : '') + why + soft + okEmpty +
+    reads + '</td>';
 }
 
 function recordById(id){
@@ -523,25 +580,40 @@ function showField(recordId, key){
   const f = r.fields[key];
   $('#pvHint').textContent = spec.label + ' · ' + r.source_name + ' · עמוד ' + r.page_number;
 
-  const box = f.crop_box;
-  const overlay = box
-    ? '<div class="pv-box" style="left:' + box[0] * 100 + '%;top:' + box[1] * 100 +
-      '%;width:' + (box[2] - box[0]) * 100 + '%;height:' + (box[3] - box[1]) * 100 + '%"></div>'
-    : '';
-  const zoomed = box
-    ? '<img src="' + pageUrl(r) + '/crops/' + key + (inkView ? '?ink=1' : '') +
-      '" alt="' + esc(spec.label) + ' מוגדל">'
-    : '<div class="pv-missing">אין מיקום אמין לשדה הזה בעמוד — הוצג הטופס המלא בלבד, בלי תקריב מומצא.</div>';
+  // תקריב אחד (המיקום הראשי), או — כשהמודלים קראו דברים שונים מאוד — תקריב לכל מודל.
+  const crops = f.two_crops
+    ? (f.regions || []).map(function(x){ return { model:x.model, box:x.box, by:x.model, ok:x.verified }; })
+    : (f.crop_box ? [{ model:f.crop_by, box:f.crop_box, by:'', ok:f.crop_verified }] : []);
+  const verified = function(c){ return !!c.ok; };
+  const overlay = crops.map(function(c, i){
+    const b = c.box;
+    return '<div class="pv-box' + (i ? ' b2' : '') + '" style="left:' + b[0] * 100 + '%;top:' +
+      b[1] * 100 + '%;width:' + (b[2] - b[0]) * 100 + '%;height:' + (b[3] - b[1]) * 100 + '%"></div>';
+  }).join('');
+  const inkButton = crops.length
+    ? ' <button class="ink-toggle' + (inkView ? ' on' : '') + '" id="inkToggle" ' +
+      'title="להציג את ההגדלה בלי מרקרים, עם כתב היד בשחור">דיו מודגש</button>' : '';
+  const zoomed = crops.length
+    ? crops.map(function(c, i){
+        const query = [];
+        if (c.by) query.push('by=' + encodeURIComponent(c.by));
+        if (inkView) query.push('ink=1');
+        const who = crops.length > 1 || !verified(c)
+          ? ' <span class="src' + (i ? ' b2' : '') + '"></span>לפי ' + esc(judgeLabel(c.model)) +
+            (verified(c) ? '' : ' <span class="unv">(מיקום לא אומת)</span>')
+          : '';
+        return '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל' +
+          who + (i === 0 ? inkButton : '') + '</div>' +
+          '<img src="' + pageUrl(r) + '/crops/' + key + (query.length ? '?' + query.join('&') : '') +
+          '" alt="' + esc(spec.label) + ' מוגדל"></div>';
+      }).join('')
+    : '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל</div>' +
+      '<div class="pv-missing">אין מיקום לשדה הזה בעמוד — הוצג הטופס המלא בלבד, בלי תקריב מומצא.</div></div>';
 
   $('#pvFrame').innerHTML =
     '<div class="pv-sec"><div class="pv-lbl">הטופס המלא</div>' +
     '<div class="pv-pagewrap"><div class="pv-page"><img src="' + pageUrl(r) + '" alt="עמוד ' +
-    r.page_number + '">' + overlay + '</div></div></div>' +
-    '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל' +
-    (box ? ' <button class="ink-toggle' + (inkView ? ' on' : '') + '" id="inkToggle" ' +
-      'title="להציג את ההגדלה בלי מרקרים, עם כתב היד בשחור">דיו מודגש</button>' : '') +
-    '</div>' +
-    zoomed + '</div>';
+    r.page_number + '">' + overlay + '</div></div></div>' + zoomed;
 }
 
 async function choose(recordId, key, values){
@@ -549,6 +621,15 @@ async function choose(recordId, key, values){
     method:'PATCH',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ field:key, values:values })
+  });
+  if (res.ok) render(await res.json());
+}
+
+async function approveEmpty(recordId, key){
+  const res = await fetch('/api/records/' + recordId, {
+    method:'PATCH',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ field:key, approve:true })
   });
   if (res.ok) render(await res.json());
 }

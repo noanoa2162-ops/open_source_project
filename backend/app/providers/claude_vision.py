@@ -1,13 +1,16 @@
-"""Claude vision judge — the only module in the project that imports the Anthropic SDK.
+"""Claude vision reader — the only module in the project that imports the Anthropic SDK.
 
-Claude gets exactly the same prompt and answer schema as the other judges. The
-long prompt goes in `system` with a cache marker, so after the first form it
-is billed at ~10% of the input price. The page is shrunk to the model's own
-limit (2576 px on the long side) with a high-quality filter, so what is sent
-is predictable rather than resized somewhere we cannot see.
+The default reader (Claude Opus 5.5) thinks before it answers; `effort` sets
+how deeply (Noa chose "high"). Deep thinking means long answers, so the call
+is streamed — the SDK refuses long non-streamed requests — and the structured
+answer is taken from the final message. The long prompt goes in `system` with
+a cache marker, so after the first form it is billed at a fraction of the input
+price. The page is shrunk to the model's own limit (2576 px on the long side)
+with a high-quality filter, so what is sent is predictable.
 
-Its boxes are requested but not trusted for the zoom panel: only Gemini's
-locations were verified against real pages so far.
+Its boxes are not trusted as the primary zoom: only Gemini's locations were
+verified against real pages so far. They are shown as a labelled "not verified"
+fallback when Gemini has no box, and next to Gemini's when the judges disagree.
 """
 
 from __future__ import annotations
@@ -34,6 +37,9 @@ from app.providers.reading import (
 MAX_LONG_SIDE = 2576  # הגבול של Claude Sonnet 5.5 לתמונה ברזולוציה גבוהה
 MAX_IMAGE_BYTES = 4_500_000  # מתחת לתקרת 5MB לתמונה, עם מרווח
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# מקום לחשיבה העמוקה ולתשובה. גבוה בכוונה — שהחשיבה לעולם לא תיקטע באמצע.
+MAX_OUTPUT_TOKENS = 64_000
+READ_TIMEOUT_SECONDS = 15 * 60  # לטופס אחד, כולל חשיבה
 
 _COORDS = """
 ## מיקום כל שדה — `box`
@@ -61,8 +67,10 @@ class ClaudeExtractionProvider:
             raise ExtractionError("אין ANTHROPIC_API_KEY בקובץ .env", fatal=True)
         self.model = model or SETTINGS.judge_b_model
         self.effort = effort or SETTINGS.claude_effort
-        # ה-SDK מנסה שוב לבד על עומס (429) ושגיאות שרת (5xx).
-        self._client = anthropic.Anthropic(api_key=key, max_retries=3)
+        # ה-SDK מנסה שוב לבד על עומס (429) ושגיאות שרת (5xx). קריאה שנכשלה לא מחויבת.
+        self._client = anthropic.Anthropic(
+            api_key=key, max_retries=2, timeout=READ_TIMEOUT_SECONDS
+        )
         self.enhance_ink = SETTINGS.enhance_ink
         self._prompt = load_prompt(_COORDS, with_ink=self.enhance_ink)
         self.prompt_version = prompt_version(self._prompt)
@@ -73,18 +81,23 @@ class ClaudeExtractionProvider:
             # אותו עמוד, בלי מרקרים ועם דיו מודגש — מוקטן לאותו גודל בדיוק.
             images.append(_image_block(ink_enhanced(image_path)))
         try:
-            response = self._client.beta.messages.parse(
+            # streaming: חשיבה עמוקה = תשובה ארוכה, וה-SDK לא מאפשר אותה בלי זרימה.
+            with self._client.beta.messages.stream(
                 model=self.model,
-                max_tokens=16000,
+                max_tokens=MAX_OUTPUT_TOKENS,
                 # הפרומפט הקבוע ראשון ועם סימון מטמון — משולם במלואו פעם אחת בלבד.
                 system=[{"type": "text", "text": self._prompt, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": [*images, {"type": "text", "text": _ASK}]}],
                 output_format=PageReading,
+                # עומק החשיבה. ב-Opus 5.5 החשיבה תמיד פועלת; זה קובע כמה עמוק.
                 output_config={"effort": self.effort},
                 # בסירוב — הבקשה עוברת אוטומטית למודל גיבוי במקום להיכשל.
                 betas=[FALLBACK_BETA],
                 fallbacks="default",
-            )
+            ) as stream:
+                response = stream.get_final_message()
+        except anthropic.APITimeoutError as exc:
+            raise ExtractionError("Claude לא סיים לקרוא את הטופס בזמן. נסו שוב.") from exc
         except anthropic.APIConnectionError as exc:
             raise ExtractionError("אין חיבור ל-Anthropic. נסו שוב בעוד רגע.") from exc
         except anthropic.APIStatusError as exc:
@@ -115,7 +128,9 @@ class ClaudeExtractionProvider:
         served_by = getattr(response, "model", None) or self.model
         raw = to_raw(parsed, served_by, _region_of, _usage(served_by, response))
         # המיקומים של Claude עוד לא נבדקו מול עמודים אמיתיים — ההגדלה לוקחת מ-Gemini.
+        # כש-Gemini לא נתן מיקום, או כשהשופטים חלוקים, מוצג גם של Claude — עם תווית "לא אומת".
         raw.regions_reliable = False
+        raw.regions_fallback = True
         return raw
 
 

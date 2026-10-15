@@ -50,6 +50,10 @@ class RawExtraction:
     # האם אפשר לסמוך על המיקומים להגדלה. GPT מחזיר תיבות, אבל בבדיקות החיות הן
     # נחתו במקום הלא נכון — ולכן ההגדלה לוקחת מיקום רק משופט שזה True אצלו.
     regions_reliable: bool = True
+    # מיקומים שלא אומתו, אבל מותר להציג כגיבוי כשאין מיקום אמין — עם תווית "לא אומת".
+    # Claude: כן. GPT: לא — בבדיקות החיות התיבות שלו נחתו במקום אחר לגמרי.
+    regions_fallback: bool = False
+    upside_down: bool = False  # השופט דיווח שהדף בתמונה הפוך (180°)
 
 
 class ExtractionProvider(Protocol):

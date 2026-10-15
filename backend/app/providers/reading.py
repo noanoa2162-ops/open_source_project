@@ -13,6 +13,7 @@ from typing import Callable
 
 from pydantic import BaseModel
 
+from app.entities import senders_for_prompt
 from app.fields import FIELDS
 from app.providers.base import (
     LEGIBILITY_PARTIAL,
@@ -22,7 +23,7 @@ from app.providers.base import (
     Usage,
 )
 
-PROMPT_NAME = "extract_v2"
+PROMPT_NAME = "extract_v3"  # v2 נשאר בתיקייה לצורך השוואה
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / f"{PROMPT_NAME}.md"
 # שם + טביעת אצבע של התוכן: כל עריכה בפרומפט פוסלת תשובות שמורות ישנות.
 PROMPT_VERSION = (
@@ -48,6 +49,7 @@ class PageReading(BaseModel):
     commitment_numbers: FieldReading
     issue_date: str | None = None
     birth_date: str | None = None
+    upside_down: bool = False
     note: str = ""
 
 
@@ -72,8 +74,20 @@ INK_SECTION = """
 """
 
 
+SENDERS_SECTION = """
+## רשימת הגורמים השולחים המוכרים
+
+ב-`sending_entity`: אם הגורם שבראש הדף הוא **בבירור** אחד מאלה — החזר את השם
+**בדיוק כפי שהוא ברשימה**. אם אינו ברשימה, או שאינך בטוח שזה אותו מוסד — העתק
+את השם בדיוק כפי שהוא מודפס. **אסור לבחור את "הכי דומה" מהרשימה.**
+
+"""
+
+
 def load_prompt(coordinates_section: str, *, with_ink: bool = False) -> str:
-    text = PROMPT_PATH.read_text(encoding="utf-8") + "\n---\n\n" + coordinates_section.strip() + "\n"
+    text = PROMPT_PATH.read_text(encoding="utf-8")
+    text += "\n---\n" + SENDERS_SECTION + senders_for_prompt() + "\n"
+    text += "\n---\n\n" + coordinates_section.strip() + "\n"
     if with_ink:
         text += "\n---\n" + INK_SECTION
     return text
@@ -111,4 +125,5 @@ def to_raw(
         context=context,
         template=(reading.template or "").strip(),
         usage=usage,
+        upside_down=bool(reading.upside_down),
     )

@@ -43,6 +43,7 @@ def _render_pdf(source: Path, out_dir: Path, cap: int) -> tuple[list[Path], int]
             page = pdf[index]
             image = page.render(scale=scale).to_pil().convert("RGB")
             _guard(image)
+            image = _straightened(image, target)
             image.save(target, format="PNG")
             image.close()
             page.close()
@@ -58,6 +59,7 @@ def _render_image(source: Path, out_dir: Path) -> list[Path]:
         # מצלמות מסובבות תמונות דרך EXIF; בלי זה הטופס מגיע הפוך למודל.
         fixed = ImageOps.exif_transpose(src).convert("RGB")
         _guard(fixed)
+        fixed = _straightened(fixed, target)
         fixed.save(target, format="PNG")
         fixed.close()
     return [target]
@@ -90,6 +92,111 @@ def ink_enhanced(page_png: Path) -> Path:
     with Image.open(page_png) as page:
         page.convert("RGB").getchannel("R").point(table).save(target, format="PNG")
     return target
+
+
+# ------------------------------------------------------------ straightening
+#
+# מקומי ובחינם, לפני שהעמוד נשלח למודלים. הרעיון: בדף ישר, שורות הטקסט יוצרות
+# "פסים" — שורה עם דיו, שורה ריקה, שורה עם דיו. מסובבים עותק קטן של הדף בזוויות
+# שונות ובוחרים את הזווית שבה הפסים הכי חדים. דף הפוך (180°) נראה בדיוק כמו דף
+# ישר מבחינת הפסים — ולכן אותו מזהים המודלים, לא הקוד הזה.
+
+PROBE_SIDE = 800  # הבדיקה רצה על עותק קטן — מהיר, והתוצאה זהה
+INK_LEVEL = 140  # כהה מזה = דיו
+MAX_SKEW = 10.0  # מעלות, לכל כיוון
+MIN_SKEW = 2.0  # הטיה קטנה מזה לא מפריעה לקריאה — לא נוגעים בדף
+# כמה הפסים צריכים להיות חדים יותר כדי שנסובב. סף שמרני: דף ישר נשאר כמו שהוא.
+SKEW_MIN_GAIN = 1.15
+SIDEWAYS_MIN_GAIN = 1.3
+
+
+def turn_note_path(page_png: Path) -> Path:
+    return page_png.with_name(page_png.stem + ".turn.txt")
+
+
+def turn_note(page_png: Path) -> str:
+    """What was straightened on this page before reading, or "" if nothing."""
+    path = turn_note_path(page_png)
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _straightened(image: Image.Image, target: Path) -> Image.Image:
+    if not SETTINGS.straighten_pages:
+        return image
+    fixed, note = straighten(image)
+    if note:
+        turn_note_path(target).write_text(note, encoding="utf-8")
+    return fixed
+
+
+def straighten(image: Image.Image) -> tuple[Image.Image, str]:
+    """A page turned on its side, or photographed slightly askew, made level.
+
+    Returns the (possibly new) image and a short Hebrew note of what was done.
+    """
+    probe = _ink_mask(image)
+    notes: list[str] = []
+
+    # דף A4 שהגיע לרוחב, ושהשורות שלו עומדות — סובב על הצד.
+    if image.width > image.height * 1.1:
+        upright = probe.rotate(90, expand=True)
+        if _stripes(upright) > _stripes(probe) * SIDEWAYS_MIN_GAIN:
+            image = image.rotate(90, expand=True)
+            probe = upright
+            notes.append("הדף הגיע על הצד — סובב ב-90°")
+
+    angle = _skew_angle(probe)
+    if angle:
+        image = image.rotate(
+            angle, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=(255, 255, 255)
+        )
+        notes.append(f"הדף היה עקום — יושר ב-{abs(angle):.1f}°")
+    return image, " · ".join(notes)
+
+
+def _ink_mask(image: Image.Image) -> Image.Image:
+    small = image.convert("L")
+    small.thumbnail((PROBE_SIDE, PROBE_SIDE))
+    return small.point(lambda v: 255 if v < INK_LEVEL else 0)
+
+
+def _stripes(mask: Image.Image) -> float:
+    """How sharply ink alternates from row to row. High = level text lines."""
+    rows = mask.resize((1, mask.height), Image.Resampling.BOX).tobytes()
+    if len(rows) < 2:
+        return 0.0
+    return sum((b - a) ** 2 for a, b in zip(rows, rows[1:])) / (len(rows) - 1)
+
+
+def _skew_angle(mask: Image.Image) -> float:
+    def score(angle: float) -> float:
+        if not angle:
+            return _stripes(mask)
+        return _stripes(mask.rotate(angle, resample=Image.Resampling.BILINEAR))
+
+    level = score(0.0)
+    best, best_score = 0.0, level
+    for whole in range(-int(MAX_SKEW), int(MAX_SKEW) + 1):
+        current = score(float(whole))
+        if current > best_score:
+            best, best_score = float(whole), current
+    for step in range(-5, 6):
+        angle = round(best + step * 0.2, 1)
+        if abs(angle) <= MAX_SKEW:
+            current = score(angle)
+            if current > best_score:
+                best, best_score = angle, current
+    if abs(best) < MIN_SKEW or best_score < level * SKEW_MIN_GAIN:
+        return 0.0
+    return best
+
+
+def turn_upside_down(page_png: Path) -> None:
+    """Rotate a stored page 180°, for display and crops. The ink copy is redone."""
+    with Image.open(page_png) as page:
+        turned = page.rotate(180)
+    turned.save(page_png, format="PNG")
+    ink_path_for(page_png).unlink(missing_ok=True)
 
 
 def _guard(image: Image.Image) -> None:

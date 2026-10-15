@@ -39,16 +39,26 @@ class Config:
     flag_single_reader: bool = True
 
 
-def _gemini(model: str | None = None, **kw) -> ExtractionProvider:
+def _gemini(model: str = "gemini-3.8-flash", **kw) -> ExtractionProvider:
     from app.providers.gemini_vision import GeminiExtractionProvider
 
     return GeminiExtractionProvider(model=model, **kw)
 
 
-def _judge_b() -> ExtractionProvider:
-    from app.pipeline import judge_b_class
+def _claude(model: str = "claude-sonnet-5-5", **kw) -> ExtractionProvider:
+    from app.providers.claude_vision import ClaudeExtractionProvider
 
-    return judge_b_class()()
+    return ClaudeExtractionProvider(model=model, **kw)
+
+
+def _configured() -> list[ExtractionProvider]:
+    """Exactly what the server uses now (.env)."""
+    from app.pipeline import build_judges
+
+    judges, problems = build_judges()
+    if problems:
+        raise ExtractionError(" ".join(problems), fatal=True)
+    return judges
 
 
 def _openai(model: str | None = None, **kw) -> ExtractionProvider:
@@ -58,22 +68,27 @@ def _openai(model: str | None = None, **kw) -> ExtractionProvider:
 
 
 CONFIGS: dict[str, Config] = {
+    "O": Config(
+        "O", f"{SETTINGS.model} — ההגדרה הנוכחית של השרת",
+        _configured, 15.0,
+        flag_single_reader=len(SETTINGS.judges) > 1,
+    ),
     "A": Config(
         "A", "gpt-6-astra לבד (גרסה 1)",
         lambda: [_openai("gpt-6-astra", split=1, detail=None)], 13.0,
         flag_single_reader=False,
     ),
     "B": Config(
-        "B", f"{SETTINGS.judge_a_model} + {SETTINGS.judge_b_model} — ההגדרה הפעילה",
-        lambda: [_gemini(), _judge_b()], 3.5,
+        "B", "gemini-3.8-flash + claude-sonnet-5-5 — שני שופטים (ההגדרה הקודמת)",
+        lambda: [_gemini(), _claude()], 3.5,
     ),
     "C": Config(
-        "C", f"{SETTINGS.judge_a_model} + gpt-5.4-mini — ההגדרה הקודמת",
+        "C", "gemini-3.8-flash + gpt-5.4-mini — ההגדרה הקודמת",
         lambda: [_gemini(), _openai("gpt-5.4-mini")], 1.0,
     ),
     "D": Config(
-        "D", f"gemma-4-31b-it + {SETTINGS.judge_b_model} — מודל פתוח, הדרך לשרת פנימי",
-        lambda: [_gemini("gemma-4-31b-it", thinking_budget=-1), _judge_b()], 3.0,
+        "D", "gemma-4-31b-it + claude-sonnet-5-5 — מודל פתוח, הדרך לשרת פנימי",
+        lambda: [_gemini("gemma-4-31b-it", thinking_budget=-1), _claude()], 3.0,
     ),
 }
 
@@ -154,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     parser = argparse.ArgumentParser(prog="evaluate", description="השוואת הגדרות מול טפסים מאומתים.")
-    parser.add_argument("--configs", default="A,B,C", help="למשל A,B,C,D (ברירת מחדל A,B,C)")
+    parser.add_argument("--configs", default="O", help="למשל O,B,C (ברירת מחדל O — ההגדרה הנוכחית)")
     parser.add_argument("--yes", action="store_true", help="להריץ בפועל (עולה כסף)")
     args = parser.parse_args(argv)
 
