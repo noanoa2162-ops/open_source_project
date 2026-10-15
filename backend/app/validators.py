@@ -8,13 +8,19 @@ UI means a person approved it, not that a validator liked it.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 
 from app.entities import canonical_sender
 from app.fields import FIELDS_BY_KEY
 from app.models import ExtractedField, FormRecord
 
 DATE_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
+# שם: אותיות עבריות או לטיניות, רווח, מקף (גם מקף עברי), גרש/גרשיים ונקודה (ראשי תיבות).
+# `?` מותר כאן — יש לו סימון משלו ("חלק מהתווים לא קריאים").
+NAME_RE = re.compile(r"^[א-תA-Za-z\s\-־'׳״\".?]+$")
+CENTRAL_LENGTH = (5, 7)  # בכל הדוגמאות: 6 ספרות. רק טווח סביר — לא חוק
+MIN_COMMITMENT_LENGTH = 4  # בדוגמאות: מ-4 ספרות (2657) עד 12 — לכן רק "קצר מדי"
+MAX_RECEIVED_AGE_DAYS = 365
 
 REASON_TEXT = {
     "missing": "השדה ריק — המודל לא מצא ערך",
@@ -34,6 +40,13 @@ REASON_TEXT = {
     "date_before_issue": "תאריך הקבלה מוקדם מתאריך ההפקה",
     "date_in_future": "תאריך הקבלה בעתיד",
     "date_is_birth": "תאריך הקבלה זהה לתאריך הלידה",
+    "date_too_old": "תאריך הקבלה ישן מאוד — לוודא",
+    "name_not_letters": "השם מכיל ספרות או סימנים",
+    "name_too_short": "שם קצר באופן חריג",
+    "central_length": "מספר מרכזי באורך חריג (בדרך כלל 6 ספרות)",
+    "commitment_too_short": "מספר התחייבות קצר באופן חריג",
+    "central_is_commitment": "אותו מספר גם במרכזי וגם בהתחייבות — לוודא",
+    "id_is_other_number": "הת\"ז זהה למספר אחר בטופס — לוודא",
     "not_on_form": "השדה לא נמצא בטופס — לאשר כריק או למלא",
     # הערות רכות: מוצגות ליד הערך, בלי כתום
     "minor_doubt": "ספק קטן — מומלץ לבדוק",
@@ -63,9 +76,12 @@ def validate_record(
                 _check_digits(field, value, key)
             elif spec.kind == "date":
                 _check_date(field, value)
+            elif key in ("first_name", "last_name"):
+                _check_name(field, value)
 
     _check_sender(record.fields["sending_entity"])
     _check_received_date(record, today or date.today())
+    _check_numbers_across_fields(record)
 
     if model_note:
         record.model_note = model_note
@@ -106,6 +122,10 @@ def _check_digits(field: ExtractedField, value: str, key: str) -> None:
     if not value.isdigit():
         field.flag("not_digits")
         return
+    if key == "central_numbers" and not CENTRAL_LENGTH[0] <= len(value) <= CENTRAL_LENGTH[1]:
+        field.flag("central_length")
+    if key == "commitment_numbers" and len(value) < MIN_COMMITMENT_LENGTH:
+        field.flag("commitment_too_short")
     if key == "national_id":
         if len(value) != 9:
             field.flag("id_length")
@@ -120,8 +140,33 @@ def _check_date(field: ExtractedField, value: str) -> None:
         field.flag("bad_date")
         return
     day, month, year = (int(g) for g in match.groups())
-    if not (1 <= month <= 12 and 1 <= day <= 31 and 1900 <= year <= 2100):
+    if not 1900 <= year <= 2100 or _parse(value) is None:
+        # כולל 31/02 או 30/02 — תאריך שאינו קיים בלוח השנה
         field.flag("impossible_date")
+
+
+def _check_name(field: ExtractedField, value: str) -> None:
+    if not NAME_RE.match(value):
+        field.flag("name_not_letters")
+        return
+    letters = [c for c in value if c.isalpha()]
+    if len(letters) < 2 and "?" not in value:
+        field.flag("name_too_short")
+
+
+def _check_numbers_across_fields(record: FormRecord) -> None:
+    """The same number in two different fields usually means one of them was misread."""
+    central = record.fields["central_numbers"]
+    commitment = record.fields["commitment_numbers"]
+    national_id = record.fields["national_id"]
+    shared = set(central.values) & set(commitment.values)
+    if shared:
+        central.flag("central_is_commitment")
+        commitment.flag("central_is_commitment")
+    for other in (central, commitment):
+        if set(national_id.values) & set(other.values):
+            national_id.flag("id_is_other_number")
+            other.flag("id_is_other_number")
 
 
 def _israeli_id_valid(value: str) -> bool:
@@ -160,6 +205,8 @@ def _check_received_date(record: FormRecord, today: date) -> None:
             continue
         if received > today:
             field.flag("date_in_future")
+        elif received < today - timedelta(days=MAX_RECEIVED_AGE_DAYS):
+            field.flag("date_too_old")
         if issued and received < issued:
             field.flag("date_before_issue")
         if born and received == born:

@@ -123,7 +123,9 @@ td.acts{white-space:nowrap;text-align:center}
 .verified{color:var(--ok);font-weight:600;font-size:12.5px}
 .pv-sec{margin-bottom:10px}
 .pv-lbl{color:#cfe0ee;font-size:12px;margin:2px 2px 6px}
-.pv-pagewrap{text-align:center}
+.pv-pagewrap,.pv-cropwrap{display:flex;align-items:center;justify-content:center}
+/* סיבוב תצוגה בלבד: הדף, הריבוע והתקריב מסתובבים יחד */
+.pv-page,.pv-cropwrap img{transition:transform .2s ease}
 /* overflow:hidden — ההכהיה סביב הריבוע נשארת על הטופס ולא דולפת על ההגדלה שמתחת */
 .pv-page{position:relative;display:inline-block;max-width:100%;overflow:hidden;
   vertical-align:top;line-height:0}
@@ -550,14 +552,55 @@ function pageUrl(r){
   return '/api/batches/' + batch + '/sources/' + r.source_index + '/pages/' + r.page_number;
 }
 
-// לחיצה על שורה (קובץ/עמוד): הטופס המלא בלבד — כמו קודם.
+// סיבוב התצוגה: לכל טופס זווית משלו, כל עוד המסך פתוח. תצוגה בלבד — הקובץ לא משתנה,
+// שום דבר לא נשלח למודל ולא עולה כסף.
+const viewTurn = {};
+
+function turnButton(){
+  return ' <button class="ink-toggle" id="turnBtn" title="לסובב את התצוגה ב-90° — לא משנה את הקובץ">' +
+    '↻ סובב</button>';
+}
+
+document.addEventListener('click', function(e){
+  if (!e.target || e.target.id !== 'turnBtn' || !selected) return;
+  viewTurn[selected.rec] = ((viewTurn[selected.rec] || 0) + 90) % 360;
+  applyTurn();
+});
+
+function applyTurn(){
+  if (!selected) return;
+  const deg = viewTurn[selected.rec] || 0;
+  const page = document.querySelector('#pvFrame .pv-page');
+  if (page) fitTurned(page, page.parentNode, page.querySelector('img'), deg, 0.44);
+  document.querySelectorAll('#pvFrame .pv-cropwrap').forEach(function(wrap){
+    const img = wrap.querySelector('img');
+    if (img) fitTurned(img, wrap, img, deg, 0.30);
+  });
+}
+
+// בסיבוב של 90° הרוחב והגובה מתחלפים: מקטינים כך שייכנס, ומגדילים את המסגרת לגובה החדש.
+function fitTurned(el, wrap, img, deg, heightShare){
+  const odd = deg % 180 !== 0;
+  const tallest = window.innerHeight * heightShare;
+  el.style.transform = deg ? 'rotate(' + deg + 'deg)' : '';
+  img.style.maxHeight = odd ? Math.min(wrap.clientWidth || 380, tallest) + 'px' : '';
+  img.style.maxWidth = odd ? tallest + 'px' : '';
+  const size = function(){ wrap.style.height = odd ? el.offsetWidth + 'px' : ''; };
+  if (img.complete) size(); else img.addEventListener('load', size, { once: true });
+}
+
+// לחיצה על שורה (קובץ/עמוד): הטופס המלא בלבד.
 function showPage(recordId){
   const r = recordById(recordId);
   if (!r) return;
   selected = { rec: recordId, key: null };
   mark(recordId, null);
   $('#pvHint').textContent = r.source_name + ' · עמוד ' + r.page_number;
-  $('#pvFrame').innerHTML = '<img src="' + pageUrl(r) + '" alt="עמוד ' + r.page_number + '">';
+  $('#pvFrame').innerHTML =
+    '<div class="pv-sec"><div class="pv-lbl">הטופס המלא' + turnButton() + '</div>' +
+    '<div class="pv-pagewrap"><div class="pv-page"><img src="' + pageUrl(r) + '" alt="עמוד ' +
+    r.page_number + '"></div></div></div>';
+  applyTurn();
 }
 
 // "דיו מודגש" בהגדלה: אותה הגדלה בלי מרקרים. הבחירה נזכרת בין טפסים.
@@ -604,16 +647,17 @@ function showField(recordId, key){
           : '';
         return '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל' +
           who + (i === 0 ? inkButton : '') + '</div>' +
-          '<img src="' + pageUrl(r) + '/crops/' + key + (query.length ? '?' + query.join('&') : '') +
-          '" alt="' + esc(spec.label) + ' מוגדל"></div>';
+          '<div class="pv-cropwrap"><img src="' + pageUrl(r) + '/crops/' + key +
+          (query.length ? '?' + query.join('&') : '') + '" alt="' + esc(spec.label) + ' מוגדל"></div></div>';
       }).join('')
     : '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל</div>' +
       '<div class="pv-missing">אין מיקום לשדה הזה בעמוד — הוצג הטופס המלא בלבד, בלי תקריב מומצא.</div></div>';
 
   $('#pvFrame').innerHTML =
-    '<div class="pv-sec"><div class="pv-lbl">הטופס המלא</div>' +
+    '<div class="pv-sec"><div class="pv-lbl">הטופס המלא' + turnButton() + '</div>' +
     '<div class="pv-pagewrap"><div class="pv-page"><img src="' + pageUrl(r) + '" alt="עמוד ' +
     r.page_number + '">' + overlay + '</div></div></div>' + zoomed;
+  applyTurn();
 }
 
 async function choose(recordId, key, values){

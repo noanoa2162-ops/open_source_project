@@ -13,6 +13,14 @@ uv sync        # פעם אחת
 uv run serve   # נפתח אוטומטית בדפדפן ב-http://127.0.0.1:8000
 ```
 
+**מומלץ: Tesseract**, לזיהוי דף שנסרק על הצד או הפוך, וסיבוב שלו לפני הקריאה. הוא
+מקומי וחינמי, ומשמש רק לכיוון הדף. בלעדיו המערכת עובדת, אבל דף מסובב נקרא מסובב,
+והתקריבים עלולים לצאת במקום הלא נכון.
+- Windows: `winget install UB-Mannheim.TesseractOCR`, או המתקין מ-
+  github.com/UB-Mannheim/tesseract.
+- Linux / Docker: `apt-get install tesseract-ocr`.
+- נמצא אוטומטית ב-PATH או ב-`C:\Program Files\Tesseract-OCR`. אחרת: `TESSERACT_CMD=` ב-`.env`.
+
 ## מה צריך ב-`.env`
 
 ```

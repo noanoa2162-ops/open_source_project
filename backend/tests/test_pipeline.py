@@ -147,7 +147,9 @@ def test_export_keeps_everything_as_text(tmp_path):
     assert row["תעודת זהות"].value == "012345678"
     assert row["תעודת זהות"].number_format == "@"
     assert row["תאריך קבלת הדגימה"].value == "18/06/2026"
-    assert row["מספר התחייבות"].value == "730578626 | 730578627"
+    # דרישת הפרויקט: שורה לכל מספר התחייבות
+    assert row["מספר התחייבות"].value == "730578626"
+    assert ws.cell(3, list(row).index("מספר התחייבות") + 1).value == "730578627"
     assert row["שם פרטי"].value.startswith("'"), "נוסחה חייבת להינטרל"
 
 

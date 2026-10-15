@@ -1,4 +1,9 @@
-"""Excel export — one row per commitment form.
+"""Excel export — one row per commitment number.
+
+A form with several commitment numbers becomes several rows (the project
+requirement, 16/10/2026): every row repeats the form's other fields, and only
+the commitment number changes. Several central numbers stay together in one
+cell, so rows never multiply into a cross product.
 
 Everything is written as text. Identifiers keep their leading zeros, dates are
 not re-parsed into Excel serial numbers, and a value starting with a formula
@@ -33,6 +38,19 @@ def neutralize(value: str) -> str:
     if value and value.startswith(FORMULA_PREFIXES):
         return "'" + value
     return value
+
+
+COMMITMENT_KEY = "commitment_numbers"
+
+
+def record_rows(record: FormRecord) -> list[list[str]]:
+    """One row per commitment number; one row when there are none or one."""
+    base = record_row(record)
+    commitments = record.fields[COMMITMENT_KEY].values
+    if len(commitments) < 2:
+        return [base]
+    column = next(i for i, f in enumerate(FIELDS) if f.key == COMMITMENT_KEY)
+    return [[*base[:column], number, *base[column + 1:]] for number in commitments]
 
 
 def record_row(record: FormRecord) -> list[str]:
@@ -83,29 +101,32 @@ def build_workbook(batch: Batch) -> Workbook:
     ws.row_dimensions[1].height = 30
     ws.freeze_panes = "A2"
 
-    for offset, record in enumerate(batch.records):
-        row_index = offset + 2
-        for column_index, value in enumerate(record_row(record), start=1):
-            cell = ws.cell(row=row_index, column=column_index, value=neutralize(value))
-            cell.number_format = "@"  # טקסט: אפסים מובילים ותאריכים נשמרים כפי שהם
-            cell.alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
-            cell.border = Border(bottom=thin)
+    row_index = 1
+    for record in batch.records:
+        for values in record_rows(record):
+            row_index += 1
+            for column_index, value in enumerate(values, start=1):
+                cell = ws.cell(row=row_index, column=column_index, value=neutralize(value))
+                cell.number_format = "@"  # טקסט: אפסים מובילים ותאריכים נשמרים כפי שהם
+                cell.alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
+                cell.border = Border(bottom=thin)
 
-            spec = FIELDS[column_index - 1] if column_index <= len(FIELDS) else None
-            if spec and record.fields[spec.key].state == STATE_REVIEW:
-                # כתום = נדרשת בדיקה. אותה משמעות כמו במסך.
-                cell.fill = PatternFill("solid", fgColor=AMBER_FILL)
-                cell.font = Font(color=AMBER_TEXT)
+                spec = FIELDS[column_index - 1] if column_index <= len(FIELDS) else None
+                if spec and record.fields[spec.key].state == STATE_REVIEW:
+                    # כתום = נדרשת בדיקה. אותה משמעות כמו במסך — בכל שורות הטופס.
+                    cell.fill = PatternFill("solid", fgColor=AMBER_FILL)
+                    cell.font = Font(color=AMBER_TEXT)
 
-    _add_notice(ws, len(batch.records) + 3, batch)
+    _add_notice(ws, row_index + 2, batch, rows=row_index - 1)
     return wb
 
 
-def _add_notice(ws, row: int, batch: Batch) -> None:
+def _add_notice(ws, row: int, batch: Batch, *, rows: int) -> None:
     sources = len(batch.accepted_sources)
     lines = [
         "דמו להאקתון — מיועד לטפסי הדוגמה בלבד. אין להסתמך על הקובץ ללא בדיקה.",
         f"מקור: {batch.display_name} · {sources} קבצים · {len(batch.records)} טפסים · "
+        f"{rows} שורות (שורה לכל מספר התחייבות) · "
         f"{batch.review_total} שדות מסומנים לבדיקה",
         "תאים כתומים דורשים בדיקה אנושית, כולל שדות ריקים. אין כאן טענת נכונות.",
     ]

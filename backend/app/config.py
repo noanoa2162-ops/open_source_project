@@ -35,6 +35,7 @@ class Settings:
     claude_effort: str = "high"
     enhance_ink: bool = False  # לשלוח למודל גם גרסת "דיו מודגש" (תמונה שנייה, עולה כסף)
     straighten_pages: bool = True  # ליישר מקומית דף עקום או על הצד, לפני הקריאה
+    auto_rotate: bool = True  # לזהות דף מסובב (90°/180°/270°) עם Tesseract ולסובב לפני הקריאה
 
     # תאימות לאחור: הקוד והבדיקות הישנים מכירים את השמות האלה.
     @property
@@ -96,6 +97,7 @@ def load_settings() -> Settings:
         ).strip().lower(),
         enhance_ink=_flag("ENHANCE_INK", "0"),
         straighten_pages=_flag("STRAIGHTEN_PAGES"),
+        auto_rotate=_flag("AUTO_ROTATE"),
     )
 
 

@@ -1370,3 +1370,383 @@ def test_prompt_lets_the_reader_recognise_cursive_names_but_flags_them():
     # ספרות נשארות קשוחות
     assert "ספרה שאינך קורא בוודאות → `?` במקומה" in text
     assert "ספרות שמתבלבלות בכתב יד: 1/7" in text
+
+
+# --------------------------- 15/10/2026: saved answers survive a server restart
+
+
+def _paid_answer(**values):
+    from app.providers.base import Usage
+
+    answer = reading("claude-opus-5-5", regions={"national_id": (0.1, 0.2, 0.3, 0.4)}, **values)
+    answer.usage = Usage(100, 10, 0.05)
+    return answer
+
+
+def test_saved_answer_survives_a_restart_and_costs_nothing(tmp_path):
+    pipeline._READ_CACHE.clear()
+    source = SourceFile(index=1, filename="f.pdf", sha256="d" * 64)
+    judge = Judge("claude-opus-5-5", _paid_answer(national_id=["001122334"]))
+    image = png(tmp_path / "p.png")
+    first = read_form(Panel([judge]), image, "b", source, 1)
+
+    pipeline._READ_CACHE.clear()  # כמו הפעלה מחדש של השרת
+    second = read_form(Panel([judge]), image, "b", source, 1)
+
+    assert judge.calls == 1, "אחרי הפעלה מחדש — לא נשלח שוב למודל"
+    assert first.cost_usd == pytest.approx(0.05) and second.cost_usd == 0.0
+    assert second.fields["national_id"].values == ["001122334"]
+    assert second.fields["national_id"].region == (0.1, 0.2, 0.3, 0.4)
+    assert list(pipeline.READ_CACHE_DIR.glob("*.json")), "נשמר בקובץ"
+    pipeline._READ_CACHE.clear()
+
+
+def test_new_prompt_or_model_is_read_again_after_restart(tmp_path):
+    pipeline._READ_CACHE.clear()
+    source = SourceFile(index=1, filename="f.pdf", sha256="e" * 64)
+    image = png(tmp_path / "p.png")
+    old = Judge("claude-opus-5-5", _paid_answer())
+    old.prompt_version = "extract_v3-aaaa"
+    read_form(Panel([old]), image, "b", source, 1)
+
+    pipeline._READ_CACHE.clear()
+    new = Judge("claude-opus-5-5", _paid_answer())
+    new.prompt_version = "extract_v3-bbbb"
+    read_form(Panel([new]), image, "b", source, 1)
+    assert new.calls == 1, "הוראות חדשות — קריאה חדשה, לא תשובה ישנה"
+    pipeline._READ_CACHE.clear()
+
+
+def test_damaged_saved_answer_is_just_read_again(tmp_path):
+    pipeline._READ_CACHE.clear()
+    source = SourceFile(index=1, filename="f.pdf", sha256="f0" * 32)
+    image = png(tmp_path / "p.png")
+    judge = Judge("claude-opus-5-5", _paid_answer())
+    read_form(Panel([judge]), image, "b", source, 1)
+    for saved in pipeline.READ_CACHE_DIR.glob("*.json"):
+        saved.write_text("{ שבור", encoding="utf-8")
+
+    pipeline._READ_CACHE.clear()
+    record = read_form(Panel([judge]), image, "b", source, 1)
+    assert judge.calls == 2 and not record.error
+    pipeline._READ_CACHE.clear()
+
+
+def test_file_without_fingerprint_is_not_saved(tmp_path):
+    pipeline._READ_CACHE.clear()
+    judge = Judge("claude-opus-5-5", _paid_answer())
+    read_form(Panel([judge]), png(tmp_path / "p.png"), "b", SOURCE, 1)
+    assert not pipeline.READ_CACHE_DIR.exists() or not list(pipeline.READ_CACHE_DIR.glob("*.json"))
+
+
+# ------------------- 16/10/2026: Tesseract OSD turns a sideways page before reading
+
+
+def _with_auto_rotate(monkeypatch, found):
+    from app import pages
+
+    monkeypatch.setattr(pages, "SETTINGS", _settings(auto_rotate=True, straighten_pages=True))
+    monkeypatch.setattr(pages, "detect_orientation", lambda image: found)
+
+
+def test_sideways_page_is_turned_upright_before_reading(tmp_path, monkeypatch):
+    from app.pages import render_pages, turn_note
+
+    _with_auto_rotate(monkeypatch, (90, 11.7))
+    source = tmp_path / "page.png"
+    Image.new("RGB", (1000, 1400), "white").save(source)
+    written, _ = render_pages(source, tmp_path / "pages")
+    with Image.open(written[0]) as page:
+        assert page.size == (1400, 1000), "סובב לרוחב — הטקסט ישר"
+    assert turn_note(written[0]) == "הדף סובב ב-90° (זוהה אוטומטית)"
+
+
+def test_turn_direction_follows_tesseract(monkeypatch):
+    from app import pages
+
+    page = Image.new("RGB", (100, 200), "white")
+    page.putpixel((0, 0), (255, 0, 0))  # פינה שמאלית-עליונה
+    monkeypatch.setattr(pages, "detect_orientation", lambda image: (90, 12.0))
+    turned, degrees, decided = pages.auto_orient(page)
+    # Tesseract: 90 = לסובב 90° בכיוון השעון. הפינה השמאלית-עליונה עוברת לימנית-עליונה.
+    assert (degrees, decided) == (90, True)
+    assert turned.size == (200, 100) and turned.getpixel((199, 0)) == (255, 0, 0)
+
+
+@pytest.mark.parametrize("found", [(90, 2.0), None])
+def test_unsure_or_missing_tesseract_leaves_the_page_alone(monkeypatch, found):
+    from app import pages
+
+    page = Image.new("RGB", (100, 200), "white")
+    monkeypatch.setattr(pages, "detect_orientation", lambda image: found)
+    turned, degrees, decided = pages.auto_orient(page)
+    assert turned is page and degrees == 0 and decided is False
+
+
+def test_upright_page_skips_the_old_sideways_guess(tmp_path, monkeypatch):
+    """When Tesseract says "upright", the stripe heuristic must not turn a wide page."""
+    from app.pages import render_pages, turn_note
+
+    _with_auto_rotate(monkeypatch, (0, 20.0))
+    source = tmp_path / "wide.png"
+    _lines_page().rotate(90, expand=True).save(source)  # רחב, והשורות עומדות
+    written, _ = render_pages(source, tmp_path / "pages")
+    with Image.open(written[0]) as page:
+        assert page.width > page.height, "Tesseract החליט — לא מנחשים מעליו"
+    assert "90" not in turn_note(written[0])
+
+
+def test_missing_tesseract_is_none_not_a_crash(monkeypatch):
+    from app import pages
+
+    monkeypatch.setattr(pages, "tesseract_command", lambda: None)
+    assert pages.detect_orientation(Image.new("RGB", (50, 50), "white")) is None
+
+
+def test_turned_page_does_not_reuse_an_answer_from_before_it_was_turned(tmp_path):
+    from app.pages import turn_note_path
+
+    pipeline._READ_CACHE.clear()
+    source = SourceFile(index=1, filename="25.pdf", sha256="2" * 64)
+    image = png(tmp_path / "page-001.png")
+    old = Judge("claude-opus-5-5", _paid_answer())
+    read_form(Panel([old]), image, "b", source, 1)  # נקרא כשהדף היה על הצד
+
+    turn_note_path(image).write_text("הדף סובב ב-90° (זוהה אוטומטית)", encoding="utf-8")
+    pipeline._READ_CACHE.clear()
+    new = Judge("claude-opus-5-5", _paid_answer())
+    record = read_form(Panel([new]), image, "b", source, 1)
+    assert new.calls == 1, "דף ישר = תמונה חדשה; התשובה הישנה עם המיקומים השגויים לא חוזרת"
+    assert "סובב" in record.straightened
+
+    # דף שלא נגעו בו שומר על אותו מפתח — ולא עולה שוב
+    pipeline._READ_CACHE.clear()
+    again = Judge("claude-opus-5-5", _paid_answer())
+    read_form(Panel([again]), image, "b", source, 1)
+    assert again.calls == 0
+    pipeline._READ_CACHE.clear()
+
+
+# ---------------- 16/10/2026: Excel — one row per commitment number (project requirement)
+
+
+def _sheet(*records):
+    import io
+
+    batch = Batch(batch_id="x", sources=[SOURCE], records=list(records))
+    ws = load_workbook(io.BytesIO(workbook_bytes(batch))).active
+    headers = [c.value for c in ws[1]]
+    return ws, headers
+
+
+def test_three_commitments_become_three_identical_rows():
+    record = one_reader(reading(
+        "claude-opus-5-5", first_name=["ישראל"], last_name=["ישראלי"], national_id=["001122334"],
+        central_numbers=["948062", "948063"], sample_received_date=["30/08/2026"],
+        sending_entity=["מכבי"],
+        commitment_numbers=["260005102632", "260005102611", "260005102644"],
+    ))
+    ws, headers = _sheet(record)
+    col = {h: i + 1 for i, h in enumerate(headers)}
+    rows = [r for r in range(2, ws.max_row + 1) if ws.cell(r, col["קובץ מקור"]).value]
+    assert len(rows) == 3
+    assert [ws.cell(r, col["מספר התחייבות"]).value for r in rows] == [
+        "260005102632", "260005102611", "260005102644"]
+    for name in ("שם פרטי", "שם משפחה", "תעודת זהות", "תאריך קבלת הדגימה", "גורם שולח",
+                 "קובץ מקור", "עמוד בקובץ"):
+        assert len({ws.cell(r, col[name]).value for r in rows}) == 1, name
+    # כמה מספרים מרכזיים — נשארים יחד בתא אחד, בלי מכפלה של שורות
+    assert {ws.cell(r, col["מספר מרכזי"]).value for r in rows} == {"948062 | 948063"}
+
+
+def test_orange_repeats_on_every_row_of_the_form():
+    record = one_reader(reading(
+        "claude-opus-5-5", legibility={"first_name": "partial"}, first_name=["ישראל"],
+        commitment_numbers=["111", "222"],
+    ))
+    ws, headers = _sheet(record)
+    col = headers.index("שם פרטי") + 1
+    assert all(ws.cell(r, col).fill.fill_type == "solid" for r in (2, 3))
+
+
+def test_form_without_or_with_one_commitment_is_one_row():
+    none = one_reader(reading("claude-opus-5-5", first_name=["א"]))
+    one = one_reader(reading("claude-opus-5-5", first_name=["ב"], commitment_numbers=["730578626"]))
+    ws, headers = _sheet(none, one)
+    col = headers.index("שם פרטי") + 1
+    assert [ws.cell(r, col).value for r in (2, 3)] == ["א", "ב"]
+    assert ws.cell(4, col).value in (None, "")
+
+
+def test_notice_counts_forms_and_rows():
+    record = one_reader(reading("claude-opus-5-5", commitment_numbers=["1", "2", "3"]))
+    ws, _ = _sheet(record)
+    texts = [ws.cell(r, 1).value or "" for r in range(1, ws.max_row + 1)]
+    assert any("1 טפסים" in t and "3 שורות" in t for t in texts)
+
+
+# ---------- 16/10/2026: a page already read is free again, whatever file it comes in
+
+
+def test_same_page_in_a_bigger_file_is_not_read_again(tmp_path):
+    pipeline._READ_CACHE.clear()
+    single = SourceFile(index=1, filename="25.pdf", sha256="a1" * 32)
+    bundle = SourceFile(index=1, filename="all-26.pdf", sha256="b2" * 32)
+    (tmp_path / "alone").mkdir()
+    alone = png(tmp_path / "alone" / "page-001.png")
+    inside = tmp_path / "bundle" / "page-007.png"
+    inside.parent.mkdir()
+    inside.write_bytes(alone.read_bytes())  # אותו עמוד, פיקסל לפיקסל
+
+    judge = Judge("claude-opus-5-5", _paid_answer(national_id=["001122334"]))
+    first = read_form(Panel([judge]), alone, "b1", single, 1)
+    pipeline._READ_CACHE.clear()  # גם אחרי הפעלה מחדש
+    second = read_form(Panel([judge]), inside, "b2", bundle, 7)
+
+    assert judge.calls == 1, "הטופס כבר נקרא בנפרד — בקובץ הגדול הוא חוזר בחינם"
+    assert first.cost_usd == pytest.approx(0.05) and second.cost_usd == 0.0
+    assert second.fields["national_id"].values == ["001122334"]
+    pipeline._READ_CACHE.clear()
+
+
+def test_a_different_page_image_is_read(tmp_path):
+    pipeline._READ_CACHE.clear()
+    source = SourceFile(index=1, filename="f.pdf", sha256="c3" * 32)
+    a = png(tmp_path / "a.png")
+    b = tmp_path / "b.png"
+    with Image.open(a) as page:
+        page = page.copy()
+    page.putpixel((5, 5), (0, 0, 0))  # פיקסל אחד שונה = סריקה אחרת
+    page.save(b)
+    judge = Judge("claude-opus-5-5", _paid_answer())
+    read_form(Panel([judge]), a, "b", source, 1)
+    read_form(Panel([judge]), b, "b", SourceFile(index=2, filename="g.pdf", sha256="d4" * 32), 1)
+    assert judge.calls == 2
+    pipeline._READ_CACHE.clear()
+
+
+def test_answer_saved_under_the_old_key_is_still_free(tmp_path):
+    pipeline._READ_CACHE.clear()
+    source = SourceFile(index=1, filename="old.pdf", sha256="e5" * 32)
+    image = png(tmp_path / "page-001.png")
+    judge = Judge("claude-opus-5-5", _paid_answer(national_id=["001122334"]))
+    from app.providers.reading import PROMPT_VERSION
+
+    old_key = (source.sha256, 1, judge.model, None, PROMPT_VERSION)  # המפתח לפני השינוי
+    pipeline._save(old_key, _paid_answer(national_id=["001122334"]))
+
+    record = read_form(Panel([judge]), image, "b", source, 1)
+    assert judge.calls == 0 and record.cost_usd == 0.0
+    assert record.fields["national_id"].values == ["001122334"]
+    pipeline._READ_CACHE.clear()
+
+
+# ------------- 16/10/2026: the full closed list (Wikipedia), prompt list frozen
+
+
+@pytest.mark.parametrize("printed, expected", [
+    ("בית החולים שמואל הרופא", "שמואל הרופא"),
+    ("מרכז רפואי שמואל הרופא", "שמואל הרופא"),
+    ("מרכז לבריאות הנפש גהה", "גהה"),
+    ("בית החולים אסותא חיפה", "אסותא חיפה"),
+    ("המרכז הרפואי אסותא אשדוד-כלניות", "אסותא אשדוד-כלניות"),
+    ("אסותא אשדוד", "אסותא אשדוד"),
+    ("בית החולים ספרא לילדים", "שיבא"),
+    ("בית החולים רות רפפורט לילדים", 'רמב"ם'),
+    ("המרכז הרפואי לשיקום לוינשטיין", "לוינשטיין"),
+    ("בית החולים רפאל", "רפאל"),
+    ("המרכז הרפואי לבריאות הנפש אברבנאל", "אברבנאל"),
+    ("המרכז הרפואי לבריאות הנפש מעלה הכרמל", "מעלה הכרמל"),
+    ("לב השרון", "לב השרון"),
+    # מרפאה של כללית בשכונה — כללית, לא בית החולים הגריאטרי "קריית שלמה"
+    ("קופת חולים כללית קריית שלמה ת\"א", "כללית"),
+])
+def test_full_list_maps_more_hospitals(printed, expected):
+    assert canonical_sender(printed) == expected
+
+
+@pytest.mark.parametrize("ordinary", [
+    "באר שבע", "מרפאת רעות", "רפאל מערכות", "מרפאת אברבנאל", "מועצה אזורית לב השרון",
+    "מרפאת מעלה הכרמל", "שער מנשה ד.נ. חפר",
+    "צה\"ל", "משרד הביטחון", "הרשות הפלסטינית",
+])
+def test_ordinary_words_and_non_hospitals_stay_unknown(ordinary):
+    assert canonical_sender(ordinary) is None, "לא בית חולים מהרשימה — נשאר כתום, לא מנוחש"
+
+
+def test_prompt_list_is_frozen_so_saved_answers_stay_valid():
+    from app.entities import PROMPT_SENDERS, SENDERS, senders_for_prompt
+
+    assert len(PROMPT_SENDERS) == 39 and set(PROMPT_SENDERS) <= set(SENDERS)
+    assert len(SENDERS) > len(PROMPT_SENDERS)
+    assert "שמואל הרופא" not in senders_for_prompt(), "הרשימה המורחבת בקוד בלבד"
+
+
+# -------------------- 16/10/2026: more field checks (local, never change a value)
+
+
+def _checked(today=date(2026, 10, 16), **values):
+    record = FormRecord.empty("b", SOURCE, 1)
+    for key, value in values.items():
+        record.fields[key].values = value if isinstance(value, list) else [value]
+    validate_record(record, today=today)
+    return record
+
+
+@pytest.mark.parametrize("value, flagged", [
+    ("31/02/2026", True), ("30/02/2026", True), ("28/02/2026", False), ("29/02/2028", False),
+])
+def test_received_date_must_exist_in_the_calendar(value, flagged):
+    reasons = _checked(sample_received_date=value).fields["sample_received_date"].reasons
+    assert ("impossible_date" in reasons) is flagged
+
+
+@pytest.mark.parametrize("value, flagged", [("01/01/2015", True), ("09/10/2026", False)])
+def test_very_old_received_date_is_flagged(value, flagged):
+    reasons = _checked(sample_received_date=value).fields["sample_received_date"].reasons
+    assert ("date_too_old" in reasons) is flagged
+
+
+@pytest.mark.parametrize("value, reason", [
+    ("ישראל3", "name_not_letters"), ("ישראל@", "name_not_letters"), ("A", "name_too_short"),
+    ("ש", "name_too_short"),
+])
+def test_odd_names_are_flagged(value, reason):
+    assert reason in _checked(first_name=value).fields["first_name"].reasons
+
+
+@pytest.mark.parametrize("value", ["ישראל", "בן-דוד", "ג'ורג'", "שמו?ל", "אבו חצירא", "Israel"])
+def test_ordinary_names_pass(value):
+    reasons = _checked(last_name=value).fields["last_name"].reasons
+    assert "name_not_letters" not in reasons and "name_too_short" not in reasons
+
+
+@pytest.mark.parametrize("value, flagged", [("12", True), ("12345678", True), ("939376", False)])
+def test_central_number_length(value, flagged):
+    assert ("central_length" in _checked(central_numbers=value).fields["central_numbers"].reasons) is flagged
+
+
+@pytest.mark.parametrize("value, flagged", [("5", True), ("2657", False), ("260005102632", False)])
+def test_commitment_number_only_too_short_is_flagged(value, flagged):
+    reasons = _checked(commitment_numbers=value).fields["commitment_numbers"].reasons
+    assert ("commitment_too_short" in reasons) is flagged
+
+
+def test_same_number_in_central_and_commitment_is_flagged_on_both():
+    r = _checked(central_numbers="939376", commitment_numbers=["730578626", "939376"])
+    assert "central_is_commitment" in r.fields["central_numbers"].reasons
+    assert "central_is_commitment" in r.fields["commitment_numbers"].reasons
+
+
+def test_id_equal_to_another_number_is_flagged():
+    r = _checked(national_id="730578626", commitment_numbers="730578626")
+    assert "id_is_other_number" in r.fields["national_id"].reasons
+    assert "id_is_other_number" in r.fields["commitment_numbers"].reasons
+
+
+def test_checks_never_change_a_value():
+    r = _checked(national_id="1234567", sample_received_date="31/02/2026", first_name="ישראל3")
+    assert r.fields["national_id"].values == ["1234567"], "לא משלימים אפסים"
+    assert r.fields["sample_received_date"].values == ["31/02/2026"]
+    assert r.fields["first_name"].values == ["ישראל3"]
+    assert "id_length" in r.fields["national_id"].reasons

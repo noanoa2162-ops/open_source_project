@@ -13,6 +13,10 @@ stops the form — it is read by the other judge and visibly marked as such.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
+import os
 import threading
 import time
 import traceback
@@ -21,7 +25,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from app.config import SETTINGS
+from app.config import SETTINGS, WORK_DIR
 from app.consensus import combine
 from app.models import Batch, FormRecord, Region, SourceFile
 from app.pages import render_pages, turn_note, turn_upside_down
@@ -33,8 +37,10 @@ from app.validators import validate_record
 Page = tuple[SourceFile, int, Path]
 
 # אותו קובץ, אותו עמוד, אותו שופט, אותו פרומפט → אותה תשובה בלי לשלם שוב.
+# בזיכרון לגישה מהירה, ובקובץ ב-work/read_cache כדי שיישמר גם אחרי הפעלה מחדש.
 _READ_CACHE: dict[tuple, RawExtraction] = {}
 _CACHE_LOCK = threading.Lock()
+READ_CACHE_DIR = WORK_DIR / "read_cache"
 
 
 def build_judges() -> tuple[list[ExtractionProvider], list[str]]:
@@ -278,24 +284,90 @@ def _turned(region: Region) -> Region:
 def _read(
     judge: ExtractionProvider, image_path: Path, source: SourceFile, page_number: int
 ) -> RawExtraction:
-    key = (
-        source.sha256,
-        page_number,
+    """One judge's reading of one page — from the saved answers when this exact page was
+    already read, in any file and at any position, with the same model and prompt."""
+    same_reader = (
         judge.model,
         getattr(judge, "split", None),
         getattr(judge, "prompt_version", PROMPT_VERSION),
     )
-    if source.sha256:
+    turned = turn_note(image_path)
+    extra = (turned,) if turned else ()
+    if not source.sha256:
+        return judge.extract(image_path)
+
+    # המפתח: טביעת האצבע של העמוד עצמו (הפיקסלים, אחרי סיבוב ויישור). אותו דף בקובץ
+    # אחר או במקום אחר בקובץ — אותה תשובה, בלי לשלם שוב.
+    key = ("page", _page_digest(image_path), *same_reader, *extra)
+    # המפתח הקודם (קובץ + מספר עמוד): תשובות שנשמרו לפני 16/10/2026 לא הולכות לאיבוד.
+    legacy = (source.sha256, page_number, *same_reader, *extra)
+
+    for candidate in (key, legacy):
         with _CACHE_LOCK:
-            cached = _READ_CACHE.get(key)
+            cached = _READ_CACHE.get(candidate)
+        if cached is None:
+            cached = _load_saved(candidate)  # אחרי הפעלה מחדש: התשובה שנשמרה בקובץ
         if cached is not None:
+            with _CACHE_LOCK:
+                _READ_CACHE[key] = cached
+            if candidate is legacy:
+                _save(key, cached)
             # תשובה שכבר שולמה: מחזירים אותה בלי עלות חדשה.
             return RawExtraction(**{**cached.__dict__, "usage": None})
+
     reading = judge.extract(image_path)
-    if source.sha256:
-        with _CACHE_LOCK:
-            _READ_CACHE[key] = reading
+    with _CACHE_LOCK:
+        _READ_CACHE[key] = reading
+    _save(key, reading)
     return reading
+
+
+def _page_digest(image_path: Path) -> str:
+    """Fingerprint of what the model actually sees: the page's pixels, not the file around it."""
+    with Image.open(image_path) as page:
+        digest = hashlib.sha256(f"{page.mode}:{page.size}".encode("ascii"))
+        digest.update(page.tobytes())
+    return digest.hexdigest()
+
+
+def _saved_path(key: tuple) -> Path:
+    digest = hashlib.sha256(json.dumps(key, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return READ_CACHE_DIR / f"{digest}.json"
+
+
+def _save(key: tuple, reading: RawExtraction) -> None:
+    """Keep a paid answer on disk. A failure here only costs a future re-read."""
+    try:
+        data = dataclasses.asdict(reading)
+        data["usage"] = None  # תשובה שמורה תמיד מוחזרת בלי עלות
+        target = _saved_path(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(f"{target.stem}.{threading.get_ident()}.tmp")
+        temp.write_text(json.dumps({"key": list(key), "reading": data}, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, target)  # קריסה באמצע לא משאירה קובץ שבור
+    except (OSError, TypeError, ValueError):
+        traceback.print_exc()
+
+
+def _load_saved(key: tuple) -> RawExtraction | None:
+    """The answer saved for this key, or None — a damaged file is simply a miss."""
+    path = _saved_path(key)
+    if not path.is_file():
+        return None
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved.get("key") != list(key):
+            return None
+        data = saved["reading"]
+        known = {f.name for f in dataclasses.fields(RawExtraction)}
+        data = {k: v for k, v in data.items() if k in known}
+        data["usage"] = None
+        data["regions"] = {
+            k: (tuple(v) if v is not None else None) for k, v in (data.get("regions") or {}).items()
+        }
+        return RawExtraction(**data)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
 
 
 def _is_low_resolution(image_path: Path) -> bool:
