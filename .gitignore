@@ -1,0 +1,31 @@
+# ---- סודות ----
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials*.json
+
+# ---- טפסים ותוצרי עיבוד ----
+samples/*
+!samples/README.md
+!samples/.gitkeep
+work/
+# טפסים מאומתים ותוצאות מדידה — מכילים תוכן של טפסים
+evaluation/
+exports/
+*.xlsx
+
+# ---- Python ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# ---- מערכת הפעלה / עורך ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
