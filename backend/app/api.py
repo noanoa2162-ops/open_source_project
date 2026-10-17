@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
 
 from app import gold, pipeline, store
-from app.config import SETTINGS
+from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
 from app.excel import workbook_bytes
-from app.fields import FIELDS, FIELDS_BY_KEY, MULTI_SEPARATOR
+from app.fields import FIELDS, FIELDS_BY_KEY
 from app.files import ACCEPTED_LABEL, sniff_kind
 from app.models import (
     STATE_APPROVED,
@@ -28,26 +29,32 @@ from app.models import (
 from app.validators import REASON_TEXT
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+# טופס לדוגמה לכפתור "נסו עם טופס דוגמה". מחוץ ל-Git (samples/ מוחרגת); אם אין — אין כפתור.
+SAMPLE_PATH = PROJECT_ROOT / "samples" / "demo-form.pdf"
+THUMB_WIDTH = 240
 
 app = FastAPI(title="טופס למידע", docs_url=None, redoc_url=None)
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    return HTMLResponse((WEB_DIR / "index.html").read_text(encoding="utf-8"))
+    # גרסה לפי זמן השינוי של הקבצים — הדפדפן לא יציג CSS/JS ישנים אחרי עדכון.
+    version = str(max(int(p.stat().st_mtime) for p in WEB_DIR.glob("app.*")))
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8").replace("{{v}}", version)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
 def config() -> dict:
     return {
         "model": SETTINGS.model,
-        "judges": SETTINGS.judges,
-        # עומק החשיבה מוצג רק כשקורא Claude פעיל
-        "effort": SETTINGS.claude_effort if any(m.startswith("claude") for m in SETTINGS.judges) else "",
+        "effort": SETTINGS.claude_effort,
         "has_key": SETTINGS.has_key,
         "max_cost_usd": SETTINGS.max_cost_per_batch_usd,
         "max_pages": SETTINGS.max_pages_per_batch,
         "max_files": SETTINGS.max_files_per_batch,
+        "sample": SAMPLE_PATH.is_file(),
         "fields": [
             {"key": f.key, "label": f.label_he, "multi": f.multi, "hint": f.hint_he}
             for f in FIELDS
@@ -70,10 +77,22 @@ async def create_batch(files: list[UploadFile]) -> dict:
             413, f"יותר מדי קבצים בבת אחת. המקסימום הוא {SETTINGS.max_files_per_batch}."
         )
 
+    received = [(upload.filename or "", await upload.read()) for upload in files]
+    return _start(received)
+
+
+@app.post("/api/batches/sample")
+def create_sample_batch() -> dict:
+    """The demo form — already read once, so it comes back from the saved answers, free."""
+    if not SAMPLE_PATH.is_file():
+        raise HTTPException(404, "אין טופס דוגמה במערכת הזו.")
+    return _start([("טופס דוגמה.pdf", SAMPLE_PATH.read_bytes())])
+
+
+def _start(received: list[tuple[str, bytes]]) -> dict:
     batch = Batch(batch_id=new_id("bat"))
-    for position, upload in enumerate(files, start=1):
-        source = await _store_source(batch.batch_id, position, upload)
-        batch.sources.append(source)
+    for position, (name, data) in enumerate(received, start=1):
+        batch.sources.append(_store_source(batch.batch_id, position, name, data))
 
     if not batch.accepted_sources:
         store.delete(batch.batch_id)
@@ -89,11 +108,8 @@ async def create_batch(files: list[UploadFile]) -> dict:
     }
 
 
-async def _store_source(batch_id: str, position: int, upload: UploadFile) -> SourceFile:
-    name = upload.filename or f"מסמך {position}"
-    source = SourceFile(index=position, filename=name)
-
-    data = await upload.read()
+def _store_source(batch_id: str, position: int, name: str, data: bytes) -> SourceFile:
+    source = SourceFile(index=position, filename=name or f"מסמך {position}")
     if not data:
         source.error = "הקובץ ריק"
         return source
@@ -127,6 +143,22 @@ def page_image(batch_id: str, source_index: int, page_number: int) -> FileRespon
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/batches/{batch_id}/sources/{source_index}/pages/{page_number}/thumb")
+def page_thumb(batch_id: str, source_index: int, page_number: int) -> FileResponse:
+    """A small copy of the page, for the live progress tiles. Made once, locally."""
+    _require(batch_id)
+    page = pipeline.page_image_path(batch_id, source_index, page_number)
+    if not page.is_file():
+        raise HTTPException(404, "העמוד עוד לא מוכן.")
+    thumb = page.with_name(page.stem + ".thumb.jpg")
+    if not thumb.is_file() or thumb.stat().st_mtime < page.stat().st_mtime:
+        with Image.open(page) as image:
+            small = image.convert("RGB")
+            small.thumbnail((THUMB_WIDTH, THUMB_WIDTH * 2))
+            small.save(thumb, format="JPEG", quality=80)
+    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/batches/{batch_id}/sources/{source_index}/pages/{page_number}/crops/{field_key}")
 def field_crop(
     batch_id: str,
@@ -134,13 +166,8 @@ def field_crop(
     page_number: int,
     field_key: str,
     ink: bool = False,
-    by: str = "",
 ) -> FileResponse:
-    """The enlarged cut-out of one field, for the lower half of the split panel.
-
-    `by` asks for one judge's location (when the judges disagree, each gets its
-    own cut-out); without it, the field's main location is used.
-    """
+    """The enlarged cut-out of one field, for the lower half of the split panel."""
     batch = _require(batch_id)
     if field_key not in FIELDS_BY_KEY:
         raise HTTPException(404, "שדה לא מוכר.")
@@ -148,17 +175,12 @@ def field_crop(
         (r for r in batch.records if r.source_index == source_index and r.page_number == page_number),
         None,
     )
-    field = record.fields[field_key] if record else None
-    region = None
-    if field is not None:
-        region = field.regions_by_model.get(by) if by else field.region
+    region = record.fields[field_key].region if record else None
     page = pipeline.page_image_path(batch_id, source_index, page_number)
     if region is None or not page.is_file():
-        # אין מיקום אמין — לא ממציאים תקריב. המסך יציג את העמוד המלא בלבד.
-        raise HTTPException(404, "אין מיקום אמין לשדה זה.")
+        # אין מיקום — לא ממציאים תקריב. המסך יציג את העמוד המלא בלבד.
+        raise HTTPException(404, "אין מיקום לשדה זה.")
     target = pipeline.crop_path(batch_id, source_index, page_number, field_key)
-    if by:
-        target = target.with_name(f"{target.stem}.{_SAFE.sub('_', by)}.png")
     if ink:
         # אותה הגדלה מגרסת "דיו מודגש": בלי מרקרים, כתב היד שחור. מקומי, בלי עלות.
         page = ink_enhanced(page)
@@ -173,15 +195,16 @@ def verify_record(record_id: str) -> dict:
     """The secretary checked every field of this form against the original.
 
     Every field becomes green, and the form is saved as an answer-key entry for
-    measurement. Refused while a field still has an unresolved disagreement.
+    measurement. Refused while any field is still orange: each one needs a fix
+    or an explicit approval first.
     """
     found = store.find_record(record_id)
     if found is None:
         raise HTTPException(404, "הרשומה לא נמצאה.")
     batch, record = found
-    open_choices = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if f.candidates]
-    if open_choices:
-        raise HTTPException(409, "יש שדות שעדיין צריך לבחור בהם ערך: " + ", ".join(open_choices))
+    still_open = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if f.state == STATE_REVIEW]
+    if still_open:
+        raise HTTPException(409, "יש שדות שעוד צריך לבדוק: " + ", ".join(still_open))
 
     for field in record.fields.values():
         field.state = STATE_APPROVED
@@ -208,20 +231,35 @@ def update_record(record_id: str, payload: dict) -> dict:
     field = record.fields[key]
 
     if "values" in payload:
+        field.remember()
         values = [str(v).strip() for v in payload["values"] if str(v).strip()]
         field.values = values
-        field.candidates = []  # הוכרע על ידי אדם
-        # תיקון אנושי מנקה את הדגלים וההערות האוטומטיים — האדם ראה את המקור.
+        # תיקון אנושי מנקה את הדגלים האוטומטיים — האדם ראה את המקור.
         field.settle()
         field.state = STATE_APPROVED if values else STATE_REVIEW
         if not values:
             field.reasons = ["missing"]
     elif payload.get("approve"):
-        if field.candidates:
-            raise HTTPException(409, "יש לבחור אחת מהאפשרויות או לתקן ידנית.")
+        field.remember()
         field.state = STATE_APPROVED
         field.settle()
 
+    return _serialise(batch)
+
+
+@app.post("/api/records/{record_id}/undo")
+def undo_field(record_id: str, payload: dict) -> dict:
+    """Put one field back the way it was before the last fix or approval."""
+    found = store.find_record(record_id)
+    if found is None:
+        raise HTTPException(404, "הרשומה לא נמצאה.")
+    batch, record = found
+    field = record.fields.get(payload.get("field"))
+    if field is None:
+        raise HTTPException(400, "שדה לא מוכר.")
+    if not field.undo():
+        raise HTTPException(409, "אין מה לבטל בשדה הזה.")
+    record.verified = False
     return _serialise(batch)
 
 
@@ -248,9 +286,6 @@ def delete_batch(batch_id: str) -> dict:
     return {"deleted": True}
 
 
-_SAFE = re.compile(r"[^A-Za-z0-9.-]")
-
-
 def _require(batch_id: str) -> Batch:
     batch = store.get(batch_id)
     if batch is None:
@@ -272,6 +307,7 @@ def _serialise(batch: Batch) -> dict:
         "warnings": batch.warnings,
         "cost_usd": batch.cost_usd,
         "seconds": batch.seconds,
+        "pages": batch.pages,
         "sources": [
             {
                 "index": s.index,
@@ -304,26 +340,9 @@ def _serialise(batch: Batch) -> dict:
                         "state": f.state,
                         "reasons": [REASON_TEXT.get(c, c) for c in f.reasons],
                         "reason_codes": f.reasons,
-                        # הערות רכות — ליד הערך, בלי כתום
-                        "notes": [REASON_TEXT.get(c, c) for c in f.notes],
-                        "note_codes": f.notes,
-                        "extra_values": f.extra_values,
-                        "candidates": [c.split(MULTI_SEPARATOR) for c in f.candidates],
-                        "readings": f.readings,
                         # האזור שנחתך בפועל — מסומן בריבוע על העמוד המלא
                         "crop_box": list(padded(f.region)) if f.region else None,
-                        "crop_by": f.region_by,
-                        "crop_verified": f.region_verified,
-                        "two_crops": f.two_crops,
-                        "regions": [
-                            {
-                                "model": m,
-                                "box": list(padded(r)),
-                                # רק המיקום הראשי של שופט מאומת (Gemini) נחשב מאומת
-                                "verified": f.region_verified and m == f.region_by,
-                            }
-                            for m, r in f.regions_by_model.items()
-                        ],
+                        "can_undo": bool(f.history),
                     }
                     for key, f in r.fields.items()
                 },

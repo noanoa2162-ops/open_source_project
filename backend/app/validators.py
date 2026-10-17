@@ -31,10 +31,7 @@ REASON_TEXT = {
     "impossible_date": "תאריך שאינו קיים בלוח השנה",
     "multiple_values": "נמצאו כמה ערכים — לוודא שכולם שייכים לטופס",
     "model_uncertain": "המודל ציין שהוא אינו בטוח",
-    "readers_disagree": "שני הקוראים לא הסכימו — בחרו או תקנו",
-    "single_value": "רק אחד הקוראים מצא ערך",
     "illegible": "חלק מהתווים לא קריאים",
-    "single_reader": "נבדק על ידי קורא אחד בלבד",
     "low_resolution": "רזולוציה נמוכה — כתב יד עלול לא להיקרא",
     "unknown_entity": "גורם שולח שאינו ברשימה המוכרת",
     "date_before_issue": "תאריך הקבלה מוקדם מתאריך ההפקה",
@@ -48,9 +45,6 @@ REASON_TEXT = {
     "central_is_commitment": "אותו מספר גם במרכזי וגם בהתחייבות — לוודא",
     "id_is_other_number": "הת\"ז זהה למספר אחר בטופס — לוודא",
     "not_on_form": "השדה לא נמצא בטופס — לאשר כריק או למלא",
-    # הערות רכות: מוצגות ליד הערך, בלי כתום
-    "minor_doubt": "ספק קטן — מומלץ לבדוק",
-    "extra_value": "מודל אחד מצא ערך נוסף — מומלץ לבדוק",
 }
 
 
@@ -62,9 +56,8 @@ def validate_record(
         spec = FIELDS_BY_KEY[key]
 
         if field.is_empty:
-            # שדה במחלוקת כבר מסומן עם האפשרויות שלו — "ריק" היה מטעה.
-            # שדה ששני השופטים לא מצאו כבר מסומן "לא קיים בטופס".
-            if not field.candidates and "not_on_form" not in field.reasons:
+            # שדה שהקורא חיפש ולא מצא כבר מסומן "לא קיים בטופס".
+            if "not_on_form" not in field.reasons:
                 field.flag("missing")
             continue
 

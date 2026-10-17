@@ -1,7 +1,6 @@
-"""`uv run evaluate` — compare configurations against forms a person verified.
+"""`uv run evaluate` — measure the reader against forms a person verified.
 
-Re-reads every verified form (saved with "שמור כמאומת") under each
-configuration and reports, per configuration:
+Re-reads every verified form (saved with "שמור כמאומת") and reports:
 
   * silent errors — a value shown without orange that differs from the verified
     one. This is the number that matters; the target is zero.
@@ -26,7 +25,7 @@ from app.config import RUNS_DIR, SETTINGS
 from app.consensus import normalize
 from app.fields import FIELDS
 from app.models import STATE_REVIEW, SourceFile
-from app.pipeline import Panel, read_form
+from app.pipeline import Reader, read_form
 from app.providers.base import ExtractionError, ExtractionProvider
 
 
@@ -34,62 +33,23 @@ from app.providers.base import ExtractionError, ExtractionProvider
 class Config:
     code: str
     title: str
-    make: Callable[[], list[ExtractionProvider]]
+    make: Callable[[], ExtractionProvider]
     cents_per_form: float  # אומדן לתצוגה לפני הרצה בלבד
-    flag_single_reader: bool = True
 
 
-def _gemini(model: str = "gemini-3.8-flash", **kw) -> ExtractionProvider:
-    from app.providers.gemini_vision import GeminiExtractionProvider
-
-    return GeminiExtractionProvider(model=model, **kw)
-
-
-def _claude(model: str = "claude-sonnet-5-5", **kw) -> ExtractionProvider:
-    from app.providers.claude_vision import ClaudeExtractionProvider
-
-    return ClaudeExtractionProvider(model=model, **kw)
-
-
-def _configured() -> list[ExtractionProvider]:
+def _configured() -> ExtractionProvider:
     """Exactly what the server uses now (.env)."""
-    from app.pipeline import build_judges
+    from app.pipeline import build_reader
 
-    judges, problems = build_judges()
-    if problems:
-        raise ExtractionError(" ".join(problems), fatal=True)
-    return judges
-
-
-def _openai(model: str | None = None, **kw) -> ExtractionProvider:
-    from app.providers.openai_vision import OpenAIExtractionProvider
-
-    return OpenAIExtractionProvider(model=model, **kw)
+    reader, problem = build_reader()
+    if reader is None:
+        raise ExtractionError(problem, fatal=True)
+    return reader
 
 
 CONFIGS: dict[str, Config] = {
-    "O": Config(
-        "O", f"{SETTINGS.model} — ההגדרה הנוכחית של השרת",
-        _configured, 15.0,
-        flag_single_reader=len(SETTINGS.judges) > 1,
-    ),
-    "A": Config(
-        "A", "gpt-6-astra לבד (גרסה 1)",
-        lambda: [_openai("gpt-6-astra", split=1, detail=None)], 13.0,
-        flag_single_reader=False,
-    ),
-    "B": Config(
-        "B", "gemini-3.8-flash + claude-sonnet-5-5 — שני שופטים (ההגדרה הקודמת)",
-        lambda: [_gemini(), _claude()], 3.5,
-    ),
-    "C": Config(
-        "C", "gemini-3.8-flash + gpt-5.4-mini — ההגדרה הקודמת",
-        lambda: [_gemini(), _openai("gpt-5.4-mini")], 1.0,
-    ),
-    "D": Config(
-        "D", "gemma-4-31b-it + claude-sonnet-5-5 — מודל פתוח, הדרך לשרת פנימי",
-        lambda: [_gemini("gemma-4-31b-it", thinking_budget=-1), _claude()], 3.0,
-    ),
+    "O": Config("O", f"{SETTINGS.model} · חשיבה {SETTINGS.claude_effort} — ההגדרה הנוכחית",
+                _configured, 15.0),
 }
 
 
@@ -122,17 +82,14 @@ def _same(key: str, a: list[str], b: list[str]) -> bool:
 
 def score_form(cfg: Config, form: gold.GoldForm, score: Score, details: list[dict]) -> None:
     try:
-        panel = Panel(cfg.make())
+        reader = Reader(cfg.make())
     except ExtractionError as exc:
         score.failures += 1
         details.append({"form": form.key, "error": str(exc)})
         return
 
     source = SourceFile(index=1, filename=form.source_name)  # בלי hash: קריאה טרייה, בלי מטמון
-    record = read_form(
-        panel, form.page_png, "evaluate", source, form.page_number,
-        flag_single_reader=cfg.flag_single_reader,
-    )
+    record = read_form(reader, form.page_png, "evaluate", source, form.page_number)
     score.forms += 1
     score.cost_usd += record.cost_usd or 0.0
     score.seconds += record.seconds
@@ -157,7 +114,7 @@ def score_form(cfg: Config, form: gold.GoldForm, score: Score, details: list[dic
             )
         details.append(
             {"form": form.key, "field": spec.key, "outcome": outcome, "truth": truth,
-             "values": got.values, "candidates": got.candidates, "reasons": got.reasons}
+             "values": got.values, "reasons": got.reasons}
         )
 
 
@@ -168,8 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
 
-    parser = argparse.ArgumentParser(prog="evaluate", description="השוואת הגדרות מול טפסים מאומתים.")
-    parser.add_argument("--configs", default="O", help="למשל O,B,C (ברירת מחדל O — ההגדרה הנוכחית)")
+    parser = argparse.ArgumentParser(prog="evaluate", description="מדידת הקורא מול טפסים מאומתים.")
+    parser.add_argument("--configs", default="O", help="ברירת מחדל O — ההגדרה הנוכחית")
     parser.add_argument("--yes", action="store_true", help="להריץ בפועל (עולה כסף)")
     args = parser.parse_args(argv)
 

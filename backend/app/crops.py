@@ -1,7 +1,7 @@
 """Cut one field out of the page and enlarge it, for the split preview panel.
 
 Done locally, on demand, at no model cost. Model coordinates are imprecise
-(OpenAI's own docs say so), so the crop gets generous margins; the full page
+(vision models say so themselves), so the crop gets generous margins; the full page
 above it shows a box around exactly the area that was cut, so a crop that
 missed is obvious rather than misleading.
 """

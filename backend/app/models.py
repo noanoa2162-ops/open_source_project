@@ -16,6 +16,15 @@ STATE_APPROVED = "approved"
 # אזור על העמוד: (x0, y0, x1, y1), כל ערך בין 0 ל-1.
 Region = tuple[float, float, float, float]
 
+UNDO_DEPTH = 10  # כמה פעולות אחורה "בטל" יכול להחזיר, לכל שדה
+
+# מצב כל דף בזמן העיבוד — לתמונות הממוזערות במסך ההתקדמות.
+PAGE_QUEUED = "queued"
+PAGE_READING = "reading"
+PAGE_DONE = "done"
+PAGE_FAILED = "failed"
+PAGE_SKIPPED = "skipped"
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
@@ -32,20 +41,9 @@ class ExtractedField:
     state: str = STATE_OK
     reasons: list[str] = field(default_factory=list)
     model_note: str = ""
-    # מה כל שופט קרא, כשלא הסכימו. המזכירה בוחרת ביניהם בלחיצה.
-    candidates: list[str] = field(default_factory=list)
-    region: Region | None = None
-    # מה כל שופט קרא בשדה הזה — להשוואת מודלים במסך: {model, values, legibility}
-    readings: list[dict] = field(default_factory=list)
-    # הערות "רכות": מוצגות ליד הערך, אבל לא צובעות בכתום ולא חוסמות ייצוא.
-    notes: list[str] = field(default_factory=list)
-    # ערכים שרק אחד השופטים מצא, כשהשני מצא חלק מהם. המזכירה יכולה להוסיף בלחיצה.
-    extra_values: list[str] = field(default_factory=list)
-    # המיקום של כל שופט בנפרד: {model: region}. `region` הוא הראשי שבו מתחילים.
-    regions_by_model: dict[str, Region] = field(default_factory=dict)
-    region_by: str = ""  # איזה שופט נתן את המיקום הראשי
-    region_verified: bool = True  # False = מיקום משופט שהמיקומים שלו עוד לא נבדקו
-    two_crops: bool = False  # מחלוקת אמיתית: מציגים את ההגדלה של כל שופט
+    region: Region | None = None  # איפה הערך בעמוד — לתקריב ולריבוע על הטופס המלא
+    # המצבים הקודמים של השדה, לכפתור "בטל" במסך: {values, state, reasons}
+    history: list[dict] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -57,16 +55,25 @@ class ExtractedField:
         if self.state != STATE_APPROVED:
             self.state = STATE_REVIEW
 
-    def note(self, reason: str) -> None:
-        """A small remark next to the value. Unlike `flag`, the field stays as it is."""
-        if reason not in self.notes:
-            self.notes.append(reason)
-
     def settle(self) -> None:
-        """A person decided this field: automatic remarks no longer apply."""
+        """A person decided this field: automatic flags no longer apply."""
         self.reasons = []
-        self.notes = []
-        self.extra_values = []
+
+    def remember(self) -> None:
+        """Keep the current state, so a person's change can be undone."""
+        self.history.append(
+            {"values": list(self.values), "state": self.state, "reasons": list(self.reasons)}
+        )
+        del self.history[:-UNDO_DEPTH]
+
+    def undo(self) -> bool:
+        if not self.history:
+            return False
+        previous = self.history.pop()
+        self.values = previous["values"]
+        self.state = previous["state"]
+        self.reasons = previous["reasons"]
+        return True
 
 
 @dataclass
@@ -99,12 +106,12 @@ class FormRecord:
     model_note: str = ""  # ספק שהמודל הביע. לא אחוז ביטחון מכויל.
     template: str = ""
     context: dict[str, str] = field(default_factory=dict)  # תאריך הפקה/לידה לבדיקות
-    readers: list[str] = field(default_factory=list)  # אילו שופטים קראו בפועל
+    readers: list[str] = field(default_factory=list)  # איזה מודל קרא בפועל
     low_resolution: bool = False
     cost_usd: float | None = None
     seconds: float = 0.0
     verified: bool = False  # המזכירה בדקה ושמרה כמאומת
-    upside_down: bool = False  # שני השופטים אמרו שהדף הגיע הפוך; סובב לתצוגה בלבד
+    upside_down: bool = False  # המודל אמר שהדף הגיע הפוך; סובב לתצוגה בלבד
     straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
 
     @property
@@ -137,6 +144,8 @@ class Batch:
     budget_skipped_pages: int = 0  # עמודים שלא עובדו בגלל תקרת התקציב
     warnings: list[str] = field(default_factory=list)  # הודעות גלויות ברמת ההעלאה
     seconds: float = 0.0
+    # לכל דף, לפי הסדר: {source_index, page_number, status, record_id}
+    pages: list[dict] = field(default_factory=list)
 
     @property
     def review_total(self) -> int:

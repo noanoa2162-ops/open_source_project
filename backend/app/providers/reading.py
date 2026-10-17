@@ -1,8 +1,9 @@
-"""The answer shape every judge must fill, shared by all adapters.
+"""The answer shape the reader must fill, and the prompt it is given.
 
-Both judges get the same prompt and the same schema, so their answers can be
-compared field by field. Only the coordinate convention differs per vendor,
-because each model is most accurate in the format it was trained on.
+Kept separate from the vendor adapter, so a different reader (for example an
+internal model) gets exactly the same instructions and schema. Only the
+coordinate convention belongs to the adapter, because each model is most
+accurate in the box format it was trained on.
 """
 
 from __future__ import annotations
@@ -59,21 +60,6 @@ def prompt_version(text: str) -> str:
     return PROMPT_NAME + "-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
-INK_SECTION = """
-## שתי תמונות של אותו עמוד
-
-קיבלת **שתי תמונות של אותו עמוד בדיוק**, באותו גודל:
-1. **המקורית** — עם הצבעים, החותמות והמרקרים.
-2. **"דיו מודגש"** — אותו עמוד אחרי הסרת המרקרים (צהוב, טורקיז) והדגשת הדיו לשחור.
-
-- **לקריאת כתב יד — במיוחד שם ות"ז — היעזר בתמונה השנייה.** בה הקווים לא נבלעים במרקר.
-- **צבעים, חותמות ורמזי מרקר — מהתמונה הראשונה.** בשנייה הם הוסרו בכוונה.
-- **המיקומים (`box`) — לפי התמונה הראשונה.** הגודל זהה, אז זה אותו מקום.
-- **אם שתי התמונות נראות סותרות לגבי תו מסוים — `?` במקומו.**
-- דיו אדום עלול להיעלם בתמונה השנייה — אם משהו כתוב באדום, קרא אותו מהראשונה.
-"""
-
-
 SENDERS_SECTION = """
 ## רשימת הגורמים השולחים המוכרים
 
@@ -84,12 +70,10 @@ SENDERS_SECTION = """
 """
 
 
-def load_prompt(coordinates_section: str, *, with_ink: bool = False) -> str:
+def load_prompt(coordinates_section: str) -> str:
     text = PROMPT_PATH.read_text(encoding="utf-8")
     text += "\n---\n" + SENDERS_SECTION + senders_for_prompt() + "\n"
     text += "\n---\n\n" + coordinates_section.strip() + "\n"
-    if with_ink:
-        text += "\n---\n" + INK_SECTION
     return text
 
 

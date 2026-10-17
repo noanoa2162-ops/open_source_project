@@ -8,9 +8,8 @@ a cache marker, so after the first form it is billed at a fraction of the input
 price. The page is shrunk to the model's own limit (2576 px on the long side)
 with a high-quality filter, so what is sent is predictable.
 
-Its boxes are not trusted as the primary zoom: only Gemini's locations were
-verified against real pages so far. They are shown as a labelled "not verified"
-fallback when Gemini has no box, and next to Gemini's when the judges disagree.
+Its boxes drive the zoom panel. The full page above the zoom shows a frame
+around exactly what was cut, so a box that missed is obvious, not misleading.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ import anthropic
 from PIL import Image
 
 from app.config import SETTINGS, cost_usd
-from app.pages import ink_enhanced
 from app.providers.base import ExtractionError, RawExtraction, Region, Usage, clamp_region
 from app.providers.reading import (
     FieldReading,
@@ -65,21 +63,17 @@ class ClaudeExtractionProvider:
         key = api_key or SETTINGS.anthropic_api_key
         if not key:
             raise ExtractionError("אין ANTHROPIC_API_KEY בקובץ .env", fatal=True)
-        self.model = model or SETTINGS.judge_b_model
+        self.model = model or SETTINGS.reader_model
         self.effort = effort or SETTINGS.claude_effort
         # ה-SDK מנסה שוב לבד על עומס (429) ושגיאות שרת (5xx). קריאה שנכשלה לא מחויבת.
         self._client = anthropic.Anthropic(
             api_key=key, max_retries=2, timeout=READ_TIMEOUT_SECONDS
         )
-        self.enhance_ink = SETTINGS.enhance_ink
-        self._prompt = load_prompt(_COORDS, with_ink=self.enhance_ink)
+        self._prompt = load_prompt(_COORDS)
         self.prompt_version = prompt_version(self._prompt)
 
     def extract(self, image_path: Path) -> RawExtraction:
         images = [_image_block(image_path)]
-        if self.enhance_ink:
-            # אותו עמוד, בלי מרקרים ועם דיו מודגש — מוקטן לאותו גודל בדיוק.
-            images.append(_image_block(ink_enhanced(image_path)))
         try:
             # streaming: חשיבה עמוקה = תשובה ארוכה, וה-SDK לא מאפשר אותה בלי זרימה.
             with self._client.beta.messages.stream(
@@ -126,12 +120,7 @@ class ClaudeExtractionProvider:
 
         # במקרה של מעבר למודל גיבוי — העלות והשם לפי המודל שבאמת ענה.
         served_by = getattr(response, "model", None) or self.model
-        raw = to_raw(parsed, served_by, _region_of, _usage(served_by, response))
-        # המיקומים של Claude עוד לא נבדקו מול עמודים אמיתיים — ההגדלה לוקחת מ-Gemini.
-        # כש-Gemini לא נתן מיקום, או כשהשופטים חלוקים, מוצג גם של Claude — עם תווית "לא אומת".
-        raw.regions_reliable = False
-        raw.regions_fallback = True
-        return raw
+        return to_raw(parsed, served_by, _region_of, _usage(served_by, response))
 
 
 def _image_block(image_path: Path) -> dict:
@@ -187,7 +176,7 @@ def _classify(exc: anthropic.APIStatusError) -> tuple[str, bool]:
     if "credit balance" in message.lower() or "billing" in message.lower():
         return "אין יתרת קרדיט בחשבון Anthropic. בדקו ב-console.anthropic.com.", True
     if isinstance(exc, anthropic.NotFoundError):
-        return "מודל Claude המוגדר אינו זמין בחשבון. בדקו את JUDGE_B_MODEL ב-.env.", True
+        return "מודל Claude המוגדר אינו זמין בחשבון. בדקו את READER_MODEL ב-.env.", True
     if isinstance(exc, anthropic.RateLimitError) or (status is not None and status >= 500):
         # ה-SDK כבר ניסה שוב — עומס שנמשך הוא בעיה של הטופס הזה, לא של החשבון.
         return "Anthropic עמוסה כרגע. נסו שוב בעוד רגע.", False

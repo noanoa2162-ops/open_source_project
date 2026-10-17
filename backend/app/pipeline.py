@@ -1,14 +1,12 @@
-"""Uploads → pages → the reader (or two judges) → validated records.
+"""Uploads → pages → the reader → validated records.
 
 A batch is one drop, however many files it contained. Every file is flattened
-into pages and every page becomes one record. By default one strong model
-(Claude Opus, deep thinking) reads each page on its own; whatever it is unsure
-of goes to the secretary as orange. With a second judge configured in .env,
-both read every page and `consensus.combine` fills only what they agree on.
+into pages and every page becomes one record. One strong model (Claude Opus,
+deep thinking) reads each page on its own; whatever it is unsure of goes to
+the secretary as orange.
 
 Runs on a worker thread so the browser gets an immediate response and can poll
-for progress. One page failing never stops the rest; one judge failing never
-stops the form — it is read by the other judge and visibly marked as such.
+for progress. One page failing never stops the rest.
 """
 
 from __future__ import annotations
@@ -27,7 +25,17 @@ from PIL import Image
 
 from app.config import SETTINGS, WORK_DIR
 from app.consensus import combine
-from app.models import Batch, FormRecord, Region, SourceFile
+from app.models import (
+    PAGE_DONE,
+    PAGE_FAILED,
+    PAGE_QUEUED,
+    PAGE_READING,
+    PAGE_SKIPPED,
+    Batch,
+    FormRecord,
+    Region,
+    SourceFile,
+)
 from app.pages import render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
 from app.providers.reading import PROMPT_VERSION
@@ -36,69 +44,43 @@ from app.validators import validate_record
 
 Page = tuple[SourceFile, int, Path]
 
-# אותו קובץ, אותו עמוד, אותו שופט, אותו פרומפט → אותה תשובה בלי לשלם שוב.
+# אותו דף, אותו מודל, אותו פרומפט → אותה תשובה בלי לשלם שוב.
 # בזיכרון לגישה מהירה, ובקובץ ב-work/read_cache כדי שיישמר גם אחרי הפעלה מחדש.
 _READ_CACHE: dict[tuple, RawExtraction] = {}
 _CACHE_LOCK = threading.Lock()
 READ_CACHE_DIR = WORK_DIR / "read_cache"
 
 
-def build_judges() -> tuple[list[ExtractionProvider], list[str]]:
-    """The readers configured in .env, and a visible reason for any that is not available."""
-    judges: list[ExtractionProvider] = []
-    problems: list[str] = []
-    for model in SETTINGS.judges:
-        try:
-            judges.append(judge_class(model)(model=model))
-        except ExtractionError as exc:
-            problems.append(str(exc))
-    return judges, problems
+def build_reader() -> tuple[ExtractionProvider | None, str]:
+    """The reader configured in .env, or None and a visible reason why not."""
+    from app.providers.claude_vision import ClaudeExtractionProvider
+
+    try:
+        return ClaudeExtractionProvider(model=SETTINGS.reader_model), ""
+    except ExtractionError as exc:
+        return None, str(exc)
 
 
-def judge_class(model: str):
-    """The adapter for a model, chosen by its name — so switching models is one line in .env."""
-    name = model.lower()
-    if name.startswith("claude"):
-        from app.providers.claude_vision import ClaudeExtractionProvider
+class Reader:
+    """The reader for one batch. After an account-level failure (no credit, bad
+    key) it is retired, so the remaining pages stop burning calls."""
 
-        return ClaudeExtractionProvider
-    if name.startswith(("gemini", "gemma")):
-        from app.providers.gemini_vision import GeminiExtractionProvider
-
-        return GeminiExtractionProvider
-    from app.providers.openai_vision import OpenAIExtractionProvider
-
-    return OpenAIExtractionProvider
-
-
-def judge_b_class(model: str | None = None):
-    """Kept for the evaluation tool: the adapter of the second judge slot."""
-    return judge_class(model or SETTINGS.judge_b_model or SETTINGS.judge_a_model)
-
-
-class Panel:
-    """The judges for one batch. A judge with an account-level failure (no
-    credit, bad key) is retired for the rest of the batch, so it stops burning
-    calls, and the remaining judge carries on."""
-
-    def __init__(self, judges: list[ExtractionProvider], expected: int | None = None) -> None:
-        self.judges = judges
-        # כמה קוראים הוגדרו. קורא אחד במכוון אינו תקלה; אחד משניים — כן.
-        self.expected = len(judges) if expected is None else expected
-        self.retired: dict[str, str] = {}
+    def __init__(self, provider: ExtractionProvider) -> None:
+        self.provider = provider
+        self.retired = ""
         self._lock = threading.Lock()
 
-    def active(self) -> list[ExtractionProvider]:
-        with self._lock:
-            return [j for j in self.judges if j.model not in self.retired]
+    @property
+    def model(self) -> str:
+        return self.provider.model
 
-    def retire(self, judge: ExtractionProvider, reason: str) -> None:
+    def retire(self, reason: str) -> None:
         with self._lock:
-            self.retired.setdefault(judge.model, reason)
+            self.retired = self.retired or reason
 
     @property
     def exhausted(self) -> bool:
-        return not self.active()
+        return bool(self.retired)
 
 
 def start(batch_id: str) -> None:
@@ -126,44 +108,45 @@ def _process(batch_id: str) -> None:
     # שלב 1: לרנדר הכול תחילה, כדי שמספר הטפסים יהיה ידוע לפני הקריאה הראשונה.
     pages = _render_all(batch_id, batch)
     batch.total_pages = len(pages)
+    batch.pages = [
+        {"source_index": s.index, "page_number": n, "status": PAGE_QUEUED, "record_id": ""}
+        for s, n, _ in pages
+    ]
     if not pages:
         batch.status = "failed"
         batch.error = _why_nothing_to_do(batch.sources)
         return
 
-    judges, problems = build_judges()
-    for problem in problems:
-        batch.warn(problem)
-    if not judges:
+    provider, problem = build_reader()
+    if provider is None:
         batch.status = "failed"
-        batch.error = " ".join(problems) or "אין שופט זמין."
+        batch.error = problem or "אין מודל זמין לקריאה."
         return
-    expected = len(SETTINGS.judges)
-    if expected > 1 and len(judges) == 1:
-        batch.warn("רק קורא אחד זמין — כל השדות יסומנו לבדיקה.")
 
-    # שלב 2: כמה טפסים במקביל (ואם הוגדרו שני שופטים — שניהם במקביל בכל טופס).
-    panel = Panel(judges, expected=expected)
-    results = _extract_all(panel, batch, pages)
-    batch.records.extend(record for record in results if record is not None)
+    # שלב 2: כמה טפסים במקביל.
+    reader = Reader(provider)
+    _extract_all(reader, batch, pages)
     batch.seconds = round(time.perf_counter() - started, 1)
 
-    for model, reason in panel.retired.items():
-        batch.warn(f"{model}: {reason}")
-    if panel.exhausted and len(batch.records) < len(pages):
-        batch.status = "failed" if not batch.records else "partial"
-        batch.error = " · ".join(panel.retired.values())
-        return
+    if reader.retired:
+        batch.warn(f"{reader.model}: {reader.retired}")
+        if len(batch.records) < len(pages):
+            batch.status = "failed" if not batch.records else "partial"
+            batch.error = reader.retired
+            return
 
     _finish(batch, len(pages))
 
 
-def _extract_all(panel: Panel, batch: Batch, pages: list[Page]) -> list[FormRecord | None]:
-    """Run every page through the panel with a small pool of threads.
+def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRecord | None]:
+    """Run every page through the reader with a small pool of threads.
 
-    Returns records in page order. A slot is None when that page was never
-    attempted: every judge retired, or the batch's cost cap was reached.
-    Only the calling thread touches `batch`, so no locking is needed there.
+    Each record joins `batch.records` the moment it is ready, so the screen can
+    show it while the rest are still being read; at the end they are put back in
+    page order. Returns the records in page order too — a slot is None when that
+    page was never attempted (the reader was retired, or the cost cap was reached).
+    Only the calling thread adds records to `batch`; workers only mark their own
+    page's status.
     """
     stop = threading.Event()
     spent = [0.0]
@@ -171,22 +154,21 @@ def _extract_all(panel: Panel, batch: Batch, pages: list[Page]) -> list[FormReco
     results: list[FormRecord | None] = [None] * len(pages)
 
     def work(index: int) -> tuple[int, FormRecord | None, str]:
-        if stop.is_set() or panel.exhausted:
+        if stop.is_set() or reader.exhausted:
             return index, None, "stopped"
         with spent_lock:
             cap = SETTINGS.max_cost_per_batch_usd  # 0 = בלי תקרה
             if cap > 0 and spent[0] >= cap:
                 return index, None, "budget"
         source, page_number, image_path = pages[index]
-        record = read_form(
-            panel, image_path, batch.batch_id, source, page_number,
-            flag_single_reader=panel.expected > 1,
-        )
+        if index < len(batch.pages):
+            batch.pages[index]["status"] = PAGE_READING
+        record = read_form(reader, image_path, batch.batch_id, source, page_number)
         if record.upside_down:
             show_upright(record, image_path)
         with spent_lock:
             spent[0] += record.cost_usd or 0.0
-        if panel.exhausted:
+        if reader.exhausted:
             # חייב להיעשות כאן ולא בתהליך הראשי, אחרת עובד כבר תפס את העמוד הבא.
             stop.set()
         return index, record, ""
@@ -195,12 +177,20 @@ def _extract_all(panel: Panel, batch: Batch, pages: list[Page]) -> list[FormReco
         futures = [pool.submit(work, i) for i in range(len(pages))]
         for future in as_completed(futures):
             index, record, why = future.result()
+            status = batch.pages[index] if index < len(batch.pages) else {}
             if record is None:
+                status["status"] = PAGE_SKIPPED
                 if why == "budget":
                     batch.budget_skipped_pages += 1
                 continue
             results[index] = record
+            batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
+            status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
             batch.processed_pages += 1
+
+    # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
+    order = {id(record): i for i, record in enumerate(results) if record is not None}
+    batch.records.sort(key=lambda record: order.get(id(record), len(order)))
 
     if batch.budget_skipped_pages:
         batch.warn(
@@ -211,67 +201,44 @@ def _extract_all(panel: Panel, batch: Batch, pages: list[Page]) -> list[FormReco
 
 
 def read_form(
-    panel: Panel,
-    image_path: Path,
-    batch_id: str,
-    source: SourceFile,
-    page_number: int,
-    *,
-    flag_single_reader: bool = True,
+    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int
 ) -> FormRecord:
-    """One page → one record: both judges in parallel, then comparison and rules."""
+    """One page → one record: the reader's answer, then the local rules."""
     started = time.perf_counter()
     record = FormRecord.empty(batch_id, source, page_number)
     record.low_resolution = _is_low_resolution(image_path)
     record.straightened = turn_note(image_path)
 
-    judges = panel.active()
-    readings: list[RawExtraction | None] = [None] * len(judges)
-    failures: list[str] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(judges))) as pool:
-        futures = {
-            pool.submit(_read, judge, image_path, source, page_number): i
-            for i, judge in enumerate(judges)
-        }
-        for future in as_completed(futures):
-            i = futures[future]
-            try:
-                readings[i] = future.result()
-            except ExtractionError as exc:
-                failures.append(f"{judges[i].model}: {exc}")
-                if exc.fatal:
-                    panel.retire(judges[i], str(exc))
-
-    done = [r for r in readings if r is not None]  # בסדר השופטים, לא בסדר הסיום
-    record.seconds = round(time.perf_counter() - started, 1)
-    costs = [r.usage.cost_usd for r in done if r.usage and r.usage.cost_usd is not None]
-    record.cost_usd = sum(costs) if costs else (0.0 if done else None)
-
-    if not done:
-        record.error = " · ".join(failures) or "אף קורא לא החזיר תשובה."
+    try:
+        reading = _read(reader.provider, image_path, source, page_number)
+    except ExtractionError as exc:
+        if exc.fatal:
+            reader.retire(str(exc))
+        record.seconds = round(time.perf_counter() - started, 1)
+        record.error = f"{reader.model}: {exc}"
         for field in record.fields.values():
             field.flag("missing")
         return record
 
-    combine(record, done, flag_single_reader=flag_single_reader)
-    if failures:
-        record.model_note = " · ".join(filter(None, [record.model_note, *failures]))
+    record.seconds = round(time.perf_counter() - started, 1)
+    usage = reading.usage
+    record.cost_usd = usage.cost_usd if usage and usage.cost_usd is not None else 0.0
+    combine(record, reading)
     validate_record(record)
     return record
 
 
 def show_upright(record: FormRecord, image_path: Path) -> None:
-    """Both judges said the page is upside down: turn the stored page 180° so
-    the secretary sees it the right way up, and move every box with it.
+    """The reader said the page is upside down: turn the stored page 180° so the
+    secretary sees it the right way up, and move every box with it.
 
-    The page is not sent again — that would double the cost. What the judges
-    read stays as it is, with its own doubts, and the row says what happened.
+    A safety net behind the automatic turn before reading (Tesseract). The page
+    is not sent again — that would double the cost; the row says what happened.
     """
     turn_upside_down(image_path)
     for field in record.fields.values():
         if field.region:
             field.region = _turned(field.region)
-        field.regions_by_model = {m: _turned(r) for m, r in field.regions_by_model.items()}
     note = "הדף הגיע הפוך — סובב לתצוגה. הקריאה נעשתה על הדף ההפוך, מומלץ לבדוק"
     record.straightened = " · ".join(filter(None, [record.straightened, note]))
 
@@ -282,19 +249,19 @@ def _turned(region: Region) -> Region:
 
 
 def _read(
-    judge: ExtractionProvider, image_path: Path, source: SourceFile, page_number: int
+    reader: ExtractionProvider, image_path: Path, source: SourceFile, page_number: int
 ) -> RawExtraction:
-    """One judge's reading of one page — from the saved answers when this exact page was
+    """The reading of one page — from the saved answers when this exact page was
     already read, in any file and at any position, with the same model and prompt."""
     same_reader = (
-        judge.model,
-        getattr(judge, "split", None),
-        getattr(judge, "prompt_version", PROMPT_VERSION),
+        reader.model,
+        None,  # מקום שמור (היה "חיתוך" לתמונה) — נשאר כדי שתשובות שמורות ימשיכו להימצא
+        getattr(reader, "prompt_version", PROMPT_VERSION),
     )
     turned = turn_note(image_path)
     extra = (turned,) if turned else ()
     if not source.sha256:
-        return judge.extract(image_path)
+        return reader.extract(image_path)
 
     # המפתח: טביעת האצבע של העמוד עצמו (הפיקסלים, אחרי סיבוב ויישור). אותו דף בקובץ
     # אחר או במקום אחר בקובץ — אותה תשובה, בלי לשלם שוב.
@@ -315,7 +282,7 @@ def _read(
             # תשובה שכבר שולמה: מחזירים אותה בלי עלות חדשה.
             return RawExtraction(**{**cached.__dict__, "usage": None})
 
-    reading = judge.extract(image_path)
+    reading = reader.extract(image_path)
     with _CACHE_LOCK:
         _READ_CACHE[key] = reading
     _save(key, reading)

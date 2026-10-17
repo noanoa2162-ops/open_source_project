@@ -12,21 +12,11 @@ HOST = "127.0.0.1"
 PORT = 8000
 
 
-def _has_key_for(model: str) -> bool:
-    if model.startswith("claude"):
-        return bool(SETTINGS.anthropic_api_key)
-    if model.startswith(("gemini", "gemma")):
-        return bool(SETTINGS.gemini_api_key)
-    return bool(SETTINGS.openai_api_key)
-
-
 def run() -> None:
     url = f"http://{HOST}:{PORT}"
     print(f"\n  טופס למידע — דמו להאקתון")
-    for model in SETTINGS.judges:
-        print(f"  קורא: {model}   מפתח: {'נטען' if _has_key_for(model) else 'חסר!'}")
-    if any(m.startswith("claude") for m in SETTINGS.judges):
-        print(f"  עומק חשיבה של Claude: {SETTINGS.claude_effort}")
+    key = "נטען" if SETTINGS.has_key else "חסר! (ANTHROPIC_API_KEY ב-.env)"
+    print(f"  קורא: {SETTINGS.reader_model} · חשיבה {SETTINGS.claude_effort}   מפתח: {key}")
     cap = SETTINGS.max_cost_per_batch_usd
     print(f"  תקרת תקציב להעלאה: {'אין' if cap <= 0 else f'${cap:.2f}'}")
     print(

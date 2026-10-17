@@ -22,7 +22,7 @@ from app.entities import canonical_sender
 from app.excel import workbook_bytes
 from app.fields import FIELDS
 from app.models import STATE_APPROVED, STATE_OK, STATE_REVIEW, Batch, FormRecord, SourceFile
-from app.pipeline import Panel, read_form
+from app.pipeline import Reader, read_form
 from app.providers.base import ExtractionError, RawExtraction, clamp_region
 from app.validators import validate_record
 
@@ -43,7 +43,7 @@ def reading(model="a", legibility=None, regions=None, context=None, **values) ->
 def record_from(*readings: RawExtraction, low_res=False, today=date(2026, 10, 14)) -> FormRecord:
     record = FormRecord.empty("b", SOURCE, 1)
     record.low_resolution = low_res
-    combine(record, list(readings))
+    combine(record, readings[0])  # קורא אחד; קריאות נוספות בבדיקות ישנות לא בשימוש
     validate_record(record, today=today)
     return record
 
@@ -83,27 +83,6 @@ def test_agreement_gives_a_neutral_value_never_green():
     assert field.state != STATE_APPROVED, "ירוק רק באישור אנושי"
 
 
-def test_disagreement_is_orange_with_both_options_and_no_value():
-    r = record_from(
-        reading("a", national_id=["001122344"]),
-        reading("b", national_id=["00112?344"]),
-    )
-    field = r.fields["national_id"]
-    assert field.values == [], "אף קורא לא מוצג כעובדה"
-    assert field.candidates == ["001122344", "00112?344"]
-    assert field.state == STATE_REVIEW
-    assert "readers_disagree" in field.reasons
-    assert "missing" not in field.reasons, "'ריק' היה מטעה כשיש אפשרויות"
-
-
-def test_only_one_judge_finding_a_value_is_orange_with_that_option():
-    r = record_from(reading("a", first_name=["שמואל"]), reading("b"))
-    field = r.fields["first_name"]
-    assert field.values == []
-    assert field.candidates == ["שמואל"]
-    assert "single_value" in field.reasons
-
-
 def test_both_empty_is_orange_not_on_form():
     # שניהם חיפשו ולא מצאו — "לא קיים בטופס". עדיין כתום: שדה חובה, אדם מאשר כריק.
     r = record_from(reading("a"), reading("b"))
@@ -129,19 +108,6 @@ def test_question_mark_is_orange_even_when_both_agree():
     assert "illegible" in field.reasons
 
 
-def test_agreement_with_partial_is_a_small_doubt_not_orange():
-    # נועה, 15/10/2026: אותה תוצאה משניהם, ואחד אמר "חלקי" → צבע רגיל + "ספק קטן".
-    r = record_from(
-        reading("a", legibility={"first_name": "partial"}, first_name=["שמואל"]),
-        reading("b", first_name=["שמואל"]),
-    )
-    field = r.fields["first_name"]
-    assert field.values == ["שמואל"]
-    assert field.state == STATE_OK, "לא כתום — אבל גם לא ירוק"
-    assert field.notes == ["minor_doubt"]
-    assert field.reasons == []
-
-
 def test_agreement_with_illegible_stays_orange():
     r = record_from(
         reading("a", legibility={"first_name": "illegible"}, first_name=["שמואל"]),
@@ -149,11 +115,6 @@ def test_agreement_with_illegible_stays_orange():
     )
     assert r.fields["first_name"].state == STATE_REVIEW
     assert "illegible" in r.fields["first_name"].reasons
-
-
-def test_one_reader_marks_every_field():
-    r = record_from(reading("a", commitment_numbers=["730578626"]))
-    assert all("single_reader" in f.reasons for f in r.fields.values())
 
 
 def test_multi_values_agree_regardless_of_order_and_keep_first_order():
@@ -255,15 +216,6 @@ def test_received_equal_to_birth_date_is_flagged():
     assert "date_is_birth" in r.fields["sample_received_date"].reasons
 
 
-def test_context_date_is_ignored_when_judges_disagree_on_it():
-    r = record_from(
-        reading("a", context={"issue_date": "15/06/2026"}, sample_received_date=["10/06/2026"]),
-        reading("b", context={"issue_date": "05/06/2026"}, sample_received_date=["10/06/2026"]),
-    )
-    assert "issue_date" not in r.context
-    assert "date_before_issue" not in r.fields["sample_received_date"].reasons
-
-
 def test_valid_received_date_passes():
     ctx = {"issue_date": "15/06/2026", "birth_date": "04/12/2009"}
     r = record_from(
@@ -288,40 +240,19 @@ def test_low_resolution_flags_handwriting_fields_even_when_judges_agree():
 
 def test_screenshot_sized_image_is_detected_as_low_resolution(tmp_path):
     small = png(tmp_path / "shot.png", size=(631, 896))
-    record = read_form(Panel([Judge("a", reading("a"))]), small, "b", SOURCE, 1)
+    record = read_form(Reader(Judge("a", reading("a"))), small, "b", SOURCE, 1)
     assert record.low_resolution
 
 
 # ------------------------------------------------------------ the panel
 
 
-def test_both_judges_are_asked_and_compared(tmp_path):
-    a = Judge("a", reading("a", commitment_numbers=["730578626"]))
-    b = Judge("b", reading("b", commitment_numbers=["730578626"]))
-    record = read_form(Panel([a, b]), png(tmp_path / "p.png"), "b", SOURCE, 1)
-    assert (a.calls, b.calls) == (1, 1)
-    assert record.readers == ["a", "b"]
-    assert record.fields["commitment_numbers"].values == ["730578626"]
-
-
-def test_one_judge_failing_falls_back_to_the_other_visibly(tmp_path):
-    a = Judge("a", error=ExtractionError("timeout"))
-    b = Judge("b", reading("b", commitment_numbers=["730578626"]))
-    record = read_form(Panel([a, b]), png(tmp_path / "p.png"), "b", SOURCE, 1)
-    assert record.error == "", "הטופס לא נופל"
-    assert all("single_reader" in f.reasons for f in record.fields.values())
-    assert "timeout" in record.model_note
-
-
-def test_account_failure_retires_the_judge_for_the_rest_of_the_batch(tmp_path):
+def test_account_failure_retires_the_reader(tmp_path):
     a = Judge("a", error=ExtractionError("אין קרדיט", fatal=True))
-    b = Judge("b", reading("b"))
-    panel = Panel([a, b])
-    image = png(tmp_path / "p.png")
-    read_form(panel, image, "b", SOURCE, 1)
-    read_form(panel, image, "b", SOURCE, 2)
-    assert a.calls == 1, "לא שורפים עוד קריאות על חשבון בלי קרדיט"
-    assert b.calls == 2
+    reader = Reader(a)
+    record = read_form(reader, png(tmp_path / "p.png"), "b", SOURCE, 1)
+    assert reader.exhausted, "לא שורפים עוד קריאות על חשבון בלי קרדיט"
+    assert "קרדיט" in record.error
 
 
 def test_same_file_twice_costs_nothing_the_second_time(tmp_path):
@@ -331,8 +262,8 @@ def test_same_file_twice_costs_nothing_the_second_time(tmp_path):
     answer.usage = __import__("app.providers.base", fromlist=["Usage"]).Usage(100, 10, 0.01)
     a = Judge("a", answer)
     image = png(tmp_path / "p.png")
-    first = read_form(Panel([a]), image, "b", source, 1)
-    second = read_form(Panel([a]), image, "b", source, 1)
+    first = read_form(Reader(a), image, "b", source, 1)
+    second = read_form(Reader(a), image, "b", source, 1)
     assert a.calls == 1
     assert first.cost_usd == pytest.approx(0.01)
     assert second.cost_usd == 0.0
@@ -351,7 +282,7 @@ def test_budget_cap_stops_before_the_next_call(tmp_path, monkeypatch):
     expensive = reading("a")
     expensive.usage = Usage(1, 1, 0.03)
     judge = Judge("a", expensive)
-    monkeypatch.setattr(pipeline, "build_judges", lambda: ([judge], []))
+    monkeypatch.setattr(pipeline, "build_reader", lambda: (judge, ""))
 
     batch = Batch(batch_id="bat_budget")
     for i in range(1, 6):
@@ -394,44 +325,6 @@ def test_crop_is_enlarged_and_cached(tmp_path):
     assert out.stat().st_mtime_ns == stamp
 
 
-def test_quarters_cover_the_whole_page_with_overlap():
-    from app.providers.openai_vision import TILE_ORIGINS, TILE_SPAN
-
-    assert TILE_SPAN > 0.5, "חפיפה במרכז"
-    for ox, oy in TILE_ORIGINS:
-        assert 0 <= ox and ox + TILE_SPAN <= 1.0001
-        assert 0 <= oy and oy + TILE_SPAN <= 1.0001
-    assert {(round(x, 2), round(y, 2)) for x, y in TILE_ORIGINS} == {
-        (0.0, 0.0), (0.45, 0.0), (0.0, 0.45), (0.45, 0.45)
-    }
-
-
-def test_box_inside_a_quarter_maps_back_to_the_page():
-    from app.providers.openai_vision import OpenAIExtractionProvider
-    from app.providers.reading import FieldReading
-
-    judge = OpenAIExtractionProvider(api_key="test", model="gpt-4o-mini", split=4)
-    # רבע 4 (ימני-תחתון) מתחיל ב-0.45; הנקודה 0.5 בתוכו = 0.45 + 0.5*0.55
-    region = judge._region_of(FieldReading(values=["x"], legibility="clear", tile=4, box=[500, 500, 600, 600]))
-    assert region == pytest.approx((0.725, 0.725, 0.78, 0.78))
-
-
-def test_quarters_are_sent_as_four_images(tmp_path):
-    from app.providers.openai_vision import page_images
-
-    assert len(page_images(png(tmp_path / "p.png"), 4)) == 4
-    assert len(page_images(png(tmp_path / "q.png"), 1)) == 1
-
-
-def test_gemini_box_order_is_converted():
-    from app.providers.gemini_vision import _region_of
-    from app.providers.reading import FieldReading
-
-    # Gemini: [ymin, xmin, ymax, xmax]
-    region = _region_of(FieldReading(values=["x"], legibility="clear", box=[100, 200, 150, 400]))
-    assert region == pytest.approx((0.2, 0.1, 0.4, 0.15))
-
-
 # --------------------------------------------------------------- the API
 
 
@@ -461,12 +354,13 @@ def api(tmp_path, monkeypatch):
     store.delete("bat_api")
 
 
-def test_api_serves_candidates_and_crop_box(api):
+def test_api_serves_values_and_crop_box(api):
     client, record = api
     data = client.get("/api/batches/bat_api").json()
     field = data["records"][0]["fields"]["national_id"]
-    assert field["candidates"] == [["001122344"], ["00112?344"]]
+    assert field["values"] == ["001122344"]
     assert field["crop_box"] is not None
+    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "can_undo"}
 
 
 def test_api_crop_endpoint(api):
@@ -482,26 +376,24 @@ def test_api_no_crop_without_a_reliable_region(api):
     assert res.status_code == 404, "לא ממציאים תקריב"
 
 
-def test_choosing_an_option_resolves_the_field(api):
-    client, record = api
-    res = client.patch(f"/api/records/{record.record_id}",
-                       json={"field": "national_id", "values": ["001122344"]})
-    field = res.json()["records"][0]["fields"]["national_id"]
-    assert field["values"] == ["001122344"]
-    assert field["state"] == STATE_APPROVED
-    assert field["candidates"] == []
+def _approve_open_fields(client, record):
+    for key, field in record.fields.items():
+        if field.state == STATE_REVIEW:
+            client.patch(f"/api/records/{record.record_id}", json={"field": key, "approve": True})
 
 
-def test_verify_is_refused_while_a_choice_is_open(api):
+def test_verify_is_refused_while_a_field_is_orange(api):
     client, record = api
+    assert any(f.state == STATE_REVIEW for f in record.fields.values())
     res = client.post(f"/api/records/{record.record_id}/verify")
-    assert res.status_code == 409
-    assert "תעודת זהות" in res.json()["detail"]
+    assert res.status_code == 409, "שדה כתום צריך תיקון או אישור מפורש לפני אישור הטופס"
+    assert record.verified is False
 
 
 def test_verify_saves_an_answer_key_entry(api, tmp_path):
     client, record = api
     client.patch(f"/api/records/{record.record_id}", json={"field": "national_id", "values": ["001122344"]})
+    _approve_open_fields(client, record)
     res = client.post(f"/api/records/{record.record_id}/verify")
     assert res.status_code == 200
     assert res.json()["records"][0]["verified"] is True
@@ -521,20 +413,6 @@ def test_holdout_is_deterministic_and_about_a_third():
 # ----------------------------------------------------------------- Excel
 
 
-def test_disputed_field_is_empty_in_excel_with_options_in_reasons(tmp_path):
-    batch = Batch(batch_id="x", sources=[SOURCE])
-    batch.records.append(record_from(
-        reading("a", national_id=["001122344"]), reading("b", national_id=["00112?344"])
-    ))
-    path = tmp_path / "out.xlsx"
-    path.write_bytes(workbook_bytes(batch))
-    ws = load_workbook(path).active
-    headers = [c.value for c in ws[1]]
-    assert ws.cell(2, headers.index("תעודת זהות") + 1).value in (None, "")
-    reasons = ws.cell(2, headers.index("סיבות") + 1).value
-    assert "001122344" in reasons and "00112?344" in reasons
-
-
 # ------------------------------------------------------------- evaluate
 
 
@@ -543,22 +421,14 @@ def test_evaluation_counts_a_silent_error(tmp_path):
 
     form = gold.GoldForm("k", png(tmp_path / "p.png"), "f.pdf", 1, "", {"commitment_numbers": ["730578626"]}, False)
     wrong = Judge("a", reading("a", commitment_numbers=["87250"]))
-    wrong2 = Judge("b", reading("b", commitment_numbers=["87250"]))
-    cfg = Config("X", "test", lambda: [wrong, wrong2], 0)
+    cfg = Config("X", "test", lambda: wrong, 0)
     score = Score()
     score_form(cfg, form, score, [])
-    assert score.silent_errors == 1, "שני השופטים הסכימו על ערך שגוי — זה בדיוק מה שנמדד"
+    assert score.silent_errors == 1, "ערך שגוי בלי כתום — זה בדיוק מה שנמדד"
     assert score.errors[0]["field"] == "commitment_numbers"
 
 
 # --------------------------------------------------------- Gemini quotas
-
-
-class _GeminiError(Exception):
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
-        self.message = message
 
 
 FREE_TIER = (
@@ -568,76 +438,7 @@ FREE_TIER = (
 )
 
 
-def test_free_tier_daily_quota_is_named_and_not_retried():
-    from app.providers.gemini_vision import _classify, _is_transient_rate_limit
-
-    exc = _GeminiError(429, FREE_TIER)
-    assert not _is_transient_rate_limit(exc), "לא מנסים שוב מכסה שמתאפסת בעוד 4 שעות"
-    message, fatal = _classify(exc)
-    assert fatal
-    assert "20 בקשות ביום" in message and "חיוב" in message
-    assert "קרדיט" not in message, "זו לא בעיית קרדיט — ההודעה הקודמת הטעתה"
-
-
-def test_short_rate_limit_is_still_retried():
-    from app.providers.gemini_vision import _is_transient_rate_limit
-
-    exc = _GeminiError(429, "Resource has been exhausted. Please retry in 12s.")
-    assert _is_transient_rate_limit(exc)
-
-
-def test_overload_503_is_retried():
-    from app.providers.gemini_vision import _is_transient_rate_limit
-
-    assert _is_transient_rate_limit(_GeminiError(503, "This model is currently experiencing high demand."))
-
-
 # ---------------------------------------------- zoom location: trusted judge only
-
-
-def test_gpt_alone_gives_no_zoom_location():
-    gpt = reading("gpt", regions={"commitment_numbers": (0.08, 0.44, 0.87, 0.58)},
-                  commitment_numbers=["2646"])
-    gpt.regions_reliable = False
-    r = record_from(gpt)
-    assert r.fields["commitment_numbers"].region is None, "בלי מיקום אמין — טופס מלא, לא תקריב שגוי"
-
-
-def test_gemini_location_is_used_even_when_gpt_is_listed_first():
-    gpt = reading("gpt", regions={"commitment_numbers": (0.08, 0.44, 0.87, 0.58)},
-                  commitment_numbers=["2646"])
-    gpt.regions_reliable = False
-    gemini = reading("gemini", regions={"commitment_numbers": (0.18, 0.37, 0.30, 0.40)},
-                     commitment_numbers=["2646"])
-    r = record_from(gpt, gemini)
-    assert r.fields["commitment_numbers"].region == (0.18, 0.37, 0.30, 0.40)
-
-
-def test_no_fallback_to_gpt_when_gemini_has_no_location_for_the_field():
-    gpt = reading("gpt", regions={"sending_entity": (0.74, 0.04, 0.91, 0.13)},
-                  sending_entity=["שמיר"])
-    gpt.regions_reliable = False
-    gemini = reading("gemini", sending_entity=["שמיר"])  # Gemini לא נתן תיבה לשדה הזה
-    r = record_from(gemini, gpt)
-    assert r.fields["sending_entity"].region is None
-
-
-def test_openai_judge_marks_its_locations_unreliable(monkeypatch):
-    from types import SimpleNamespace
-
-    from app.providers.openai_vision import OpenAIExtractionProvider
-    from app.providers.reading import FieldReading, PageReading
-
-    judge = OpenAIExtractionProvider(api_key="test", model="gpt-5.4-mini")
-    empty = FieldReading(values=[], legibility="absent")
-    parsed = PageReading(template="x", **{
-        k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "upside_down", "note")
-    })
-    completion = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed, refusal=None, content=""))],
-        usage=None,
-    )
-    assert judge._to_domain(completion).regions_reliable is False
 
 
 # ------------------------------------------------- editing the prompt takes effect
@@ -650,12 +451,12 @@ def test_edited_prompt_is_not_served_from_the_cache(tmp_path):
     image = png(tmp_path / "p.png")
 
     judge.prompt_version = "extract_v2-aaaa1111"
-    read_form(Panel([judge]), image, "b", source, 1)
-    read_form(Panel([judge]), image, "b", source, 1)
+    read_form(Reader(judge), image, "b", source, 1)
+    read_form(Reader(judge), image, "b", source, 1)
     assert judge.calls == 1, "אותו פרומפט — מהמטמון"
 
     judge.prompt_version = "extract_v2-bbbb2222"  # נועה ערכה את הפרומפט
-    read_form(Panel([judge]), image, "b", source, 1)
+    read_form(Reader(judge), image, "b", source, 1)
     assert judge.calls == 2, "פרומפט חדש — קריאה חדשה, לא תשובה ישנה"
     pipeline._READ_CACHE.clear()
 
@@ -670,33 +471,6 @@ def test_prompt_version_follows_the_text():
 # ------------------------------------------------- model comparison per field
 
 
-def test_each_field_records_what_every_judge_read_when_they_agree():
-    r = record_from(
-        reading("gemini-3.8-flash", central_numbers=["939376"]),
-        reading("gpt-5.4-mini", central_numbers=["939376"]),
-    )
-    assert r.fields["central_numbers"].readings == [
-        {"model": "gemini-3.8-flash", "values": ["939376"], "legibility": "clear"},
-        {"model": "gpt-5.4-mini", "values": ["939376"], "legibility": "clear"},
-    ]
-
-
-def test_readings_are_kept_when_judges_disagree_and_are_normalized():
-    r = record_from(
-        reading("gemini-3.8-flash", sample_received_date=["18/06/2026"]),
-        reading("gpt-5.4-mini", legibility={"sample_received_date": "partial"},
-                sample_received_date=["22-08-26"]),
-    )
-    readings = r.fields["sample_received_date"].readings
-    assert [x["values"] for x in readings] == [["18/06/2026"], ["22/08/2026"]]
-    assert [x["legibility"] for x in readings] == ["clear", "partial"]
-
-
-def test_single_judge_has_one_reading():
-    r = record_from(reading("gpt-5.4-mini", first_name=["שמו?ל"]))
-    assert len(r.fields["first_name"].readings) == 1
-
-
 def test_partial_name_from_both_judges_is_visible_but_orange():
     r = record_from(
         reading("a", legibility={"first_name": "partial"}, first_name=["שמו?ל"]),
@@ -705,12 +479,6 @@ def test_partial_name_from_both_judges_is_visible_but_orange():
     field = r.fields["first_name"]
     assert field.values == ["שמו?ל"], "המזכירה רואה את מה שנקרא"
     assert field.state == STATE_REVIEW, "אבל זה לא מאושר — כתום"
-
-
-def test_api_serves_readings(api):
-    client, _ = api
-    field = client.get("/api/batches/bat_api").json()["records"][0]["fields"]["national_id"]
-    assert [x["values"] for x in field["readings"]] == [["001122344"], ["00112?344"]]
 
 
 # ----------------------------------------------------------- Claude as judge B
@@ -734,16 +502,7 @@ def _page_reading(**fields):
     return reading
 
 
-def test_judge_b_is_chosen_by_model_name():
-    from app.pipeline import judge_b_class
-    from app.providers.claude_vision import ClaudeExtractionProvider
-    from app.providers.openai_vision import OpenAIExtractionProvider
-
-    assert judge_b_class("claude-sonnet-5-5") is ClaudeExtractionProvider
-    assert judge_b_class("gpt-5.4-mini") is OpenAIExtractionProvider
-
-
-def test_claude_answer_becomes_a_reading_with_untrusted_locations():
+def test_claude_answer_becomes_a_reading_with_its_locations():
     from types import SimpleNamespace
 
     from app.providers.claude_vision import ClaudeExtractionProvider
@@ -758,7 +517,7 @@ def test_claude_answer_becomes_a_reading_with_untrusted_locations():
     raw = judge._to_domain(_claude_response(parsed, usage=usage))
 
     assert raw.values["national_id"] == ["0011223344"]
-    assert raw.regions_reliable is False, "ההגדלה ממשיכה לקחת מיקום רק מ-Gemini"
+    assert raw.regions["national_id"] == pytest.approx((0.1, 0.3, 0.4, 0.34)), "המיקום משמש לתקריב"
     assert raw.usage.cost_usd == pytest.approx((5000 * 2 + 6000 * 0.2 + 800 * 10) / 1_000_000)
 
 
@@ -854,38 +613,10 @@ def test_ink_version_keeps_the_page_size_and_is_made_once(tmp_path):
     assert out.stat().st_mtime_ns == stamp
 
 
-def test_prompt_mentions_the_second_image_only_when_it_is_sent():
-    from app.providers.reading import load_prompt, prompt_version
-
-    plain, with_ink = load_prompt("x"), load_prompt("x", with_ink=True)
-    assert "שתי תמונות של אותו עמוד" in with_ink
-    assert "שתי תמונות של אותו עמוד" not in plain
-    assert prompt_version(plain) != prompt_version(with_ink), "המטמון לא יחזיר תשובה ישנה"
-
-
 def _settings(**changes):
     from app.config import SETTINGS
 
     return replace(SETTINGS, **changes)
-
-
-@pytest.mark.parametrize("enabled, expected", [(True, 2), (False, 1)])
-def test_gemini_sends_the_ink_version(tmp_path, monkeypatch, enabled, expected):
-    from types import SimpleNamespace
-
-    from app.providers import gemini_vision as gv
-
-    sent = {}
-
-    class _Models:
-        def generate_content(self, model, contents, config):
-            sent["images"] = [c for c in contents if not isinstance(c, str)]
-            return SimpleNamespace(parsed=_page_reading(), text="", usage_metadata=None)
-
-    monkeypatch.setattr(gv, "SETTINGS", _settings(enhance_ink=enabled))
-    monkeypatch.setattr(gv.genai, "Client", lambda api_key: SimpleNamespace(models=_Models()))
-    gv.GeminiExtractionProvider(api_key="test").extract(png(tmp_path / "page-001.png"))
-    assert len(sent["images"]) == expected
 
 
 class _FakeStream:
@@ -918,7 +649,6 @@ def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
     from app.providers import claude_vision as cv
 
     sent = {}
-    monkeypatch.setattr(cv, "SETTINGS", _settings(enhance_ink=False))
     judge = cv.ClaudeExtractionProvider(api_key="test", model="claude-opus-5-5")
     judge._client = _streaming_client(sent, _claude_response(_page_reading(), model="claude-opus-5-5"))
     raw = judge.extract(_swatches(tmp_path / "page-001.png"))
@@ -929,34 +659,19 @@ def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
     assert raw.model == "claude-opus-5-5"
 
 
-@pytest.mark.parametrize("enabled, expected", [(True, 2), (False, 1)])
-def test_claude_sends_the_ink_version_first_original_then_ink(tmp_path, monkeypatch, enabled, expected):
-    from types import SimpleNamespace
-
+def test_claude_sends_the_page_once(tmp_path):
     from app.providers import claude_vision as cv
 
     sent = {}
-    monkeypatch.setattr(cv, "SETTINGS", _settings(enhance_ink=enabled))
     judge = cv.ClaudeExtractionProvider(api_key="test")
     judge._client = _streaming_client(sent)
     page = _swatches(tmp_path / "page-001.png")
     judge.extract(page)
 
     images = [c for c in sent["content"] if c["type"] == "image"]
-    assert len(images) == expected
+    assert len(images) == 1, "תמונה אחת — העמוד עצמו"
+    assert images[0]["source"]["data"] == cv.page_png_b64(page)
     assert sent["content"][-1]["type"] == "text"
-    if enabled:
-        from app.providers.claude_vision import page_png_b64
-
-        assert images[0]["source"]["data"] == page_png_b64(page), "המקורית ראשונה"
-
-
-def test_gpt_quarters_do_not_get_an_ink_copy(monkeypatch):
-    from app.providers import openai_vision as ov
-
-    monkeypatch.setattr(ov, "SETTINGS", _settings(enhance_ink=True))
-    assert ov.OpenAIExtractionProvider(api_key="t", model="gpt-4o-mini", split=4).enhance_ink is False
-    assert ov.OpenAIExtractionProvider(api_key="t", model="gpt-5.4-mini", split=1).enhance_ink is True
 
 
 def test_api_crop_in_ink_view(api):
@@ -981,99 +696,11 @@ def test_question_mark_in_agreement_is_still_orange_even_with_partial():
     assert r.fields["national_id"].state == STATE_REVIEW
 
 
-def test_extra_value_from_one_judge_keeps_the_shared_value():
-    # הדוגמה של נועה: Gemini ‏11223344 | 986547213, Claude ‏11223344 → 11223344 + הודעה.
-    r = record_from(
-        reading("gemini", commitment_numbers=["11223344", "986547213"]),
-        reading("claude", commitment_numbers=["11223344"]),
-    )
-    field = r.fields["commitment_numbers"]
-    assert field.values == ["11223344"]
-    assert field.extra_values == ["986547213"], "הערך הנוסף לא נעלם — מוצע בלחיצה"
-    assert field.notes == ["extra_value"]
-    assert field.state == STATE_OK
-    assert field.candidates == []
-
-
-def test_partial_overlap_is_still_a_disagreement():
-    r = record_from(
-        reading("gemini", commitment_numbers=["111", "222"]),
-        reading("claude", commitment_numbers=["111", "333"]),
-    )
-    field = r.fields["commitment_numbers"]
-    assert field.values == [] and "readers_disagree" in field.reasons
-
-
-def test_one_empty_judge_is_not_an_extra_value_case():
-    r = record_from(reading("gemini", commitment_numbers=["111"]), reading("claude"))
-    assert "single_value" in r.fields["commitment_numbers"].reasons
-
-
-def _claude(**kw):
-    raw = reading("claude-sonnet-5-5", **kw)
-    raw.regions_reliable = False
-    raw.regions_fallback = True
-    return raw
-
-
-def test_claude_location_is_a_labelled_fallback_when_gemini_has_none():
-    gemini = reading("gemini-3.8-flash", sending_entity=["מכבי"])
-    claude = _claude(regions={"sending_entity": (0.6, 0.02, 0.9, 0.08)}, sending_entity=["מכבי"])
-    field = record_from(gemini, claude).fields["sending_entity"]
-    assert field.region == (0.6, 0.02, 0.9, 0.08)
-    assert field.region_by == "claude-sonnet-5-5"
-    assert field.region_verified is False, "המסך מציין 'מיקום לא אומת'"
-
-
-def test_gemini_location_stays_primary_when_both_have_one():
-    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
-                     national_id=["001122334"])
-    claude = _claude(regions={"national_id": (0.6, 0.1, 0.8, 0.12)}, national_id=["001122334"])
-    field = record_from(gemini, claude).fields["national_id"]
-    assert field.region == (0.1, 0.5, 0.3, 0.52) and field.region_verified is True
-    assert field.two_crops is False, "הסכמה — תקריב אחד"
-
-
-def test_very_different_readings_get_a_crop_from_each_judge():
-    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
-                     national_id=["001122334"])
-    claude = _claude(regions={"national_id": (0.12, 0.5, 0.32, 0.52)}, national_id=["987650000"])
-    field = record_from(gemini, claude).fields["national_id"]
-    assert field.two_crops is True
-    assert set(field.regions_by_model) == {"gemini-3.8-flash", "claude-sonnet-5-5"}
-
-
-def test_similar_readings_in_the_same_place_get_one_crop():
-    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
-                     national_id=["001122334"])
-    claude = _claude(regions={"national_id": (0.11, 0.5, 0.31, 0.52)}, national_id=["001122384"])
-    field = record_from(gemini, claude).fields["national_id"]
-    assert "readers_disagree" in field.reasons
-    assert field.two_crops is False
-
-
-def test_similar_readings_in_different_places_get_two_crops():
-    gemini = reading("gemini-3.8-flash", regions={"national_id": (0.1, 0.5, 0.3, 0.52)},
-                     national_id=["001122334"])
-    claude = _claude(regions={"national_id": (0.6, 0.1, 0.8, 0.12)}, national_id=["001122384"])
-    assert record_from(gemini, claude).fields["national_id"].two_crops is True
-
-
-def test_gpt_locations_are_never_a_fallback():
-    gemini = reading("gemini-3.8-flash", national_id=["001122334"])
-    gpt = reading("gpt-5.4-mini", regions={"national_id": (0.6, 0.1, 0.8, 0.12)},
-                  national_id=["001122334"])
-    gpt.regions_reliable = False
-    field = record_from(gemini, gpt).fields["national_id"]
-    assert field.region is None and field.regions_by_model == {}
-
-
-def test_upside_down_needs_both_judges():
-    a, b = reading("a"), reading("b")
+def test_upside_down_comes_from_the_reader():
+    a = reading("a")
+    assert record_from(a).upside_down is False
     a.upside_down = True
-    assert record_from(a, b).upside_down is False
-    b.upside_down = True
-    assert record_from(a, b).upside_down is True
+    assert record_from(a).upside_down is True
 
 
 def test_show_upright_turns_the_page_and_every_box(tmp_path):
@@ -1090,7 +717,6 @@ def test_show_upright_turns_the_page_and_every_box(tmp_path):
         assert turned.getpixel((99, 199)) == (255, 0, 0)
     region = record.fields["national_id"].region
     assert region == pytest.approx((0.7, 0.6, 0.9, 0.8))
-    assert record.fields["national_id"].regions_by_model["gemini"] == pytest.approx(region)
     assert "הפוך" in record.straightened
 
 
@@ -1174,47 +800,15 @@ def test_render_writes_the_turn_note(tmp_path):
     assert "יושר" in turn_note(written[0])
 
 
-def test_soft_notes_are_not_orange_in_excel_but_are_written():
-    import io
-
-    record = record_from(
-        reading("a", legibility={"first_name": "partial"}, first_name=["שמואל"],
-                commitment_numbers=["111", "222"]),
-        reading("b", first_name=["שמואל"], commitment_numbers=["111"]),
-    )
-    batch = Batch(batch_id="b", sources=[SOURCE], records=[record])
-    ws = load_workbook(io.BytesIO(workbook_bytes(batch))).active
-    headers = [c.value for c in ws[1]]
-    first = ws.cell(row=2, column=headers.index("שם פרטי") + 1)
-    assert first.value == "שמואל"
-    assert first.fill.fill_type is None, "ספק קטן — לא כתום"
-    reasons = ws.cell(row=2, column=headers.index("סיבות") + 1).value
-    assert "ספק קטן" in reasons and "222" in reasons
-
-
-def test_api_crop_per_judge_and_unknown_judge(api):
-    client, record = api
-    field = record.fields["national_id"]
-    field.regions_by_model = {"a": (0.4, 0.4, 0.6, 0.45), "claude-sonnet-5-5": (0.1, 0.1, 0.3, 0.15)}
-    base = "/api/batches/bat_api/sources/1/pages/1/crops/national_id"
-    assert client.get(base + "?by=claude-sonnet-5-5").status_code == 200
-    assert client.get(base + "?by=claude-sonnet-5-5&ink=1").status_code == 200
-    assert client.get(base + "?by=nobody").status_code == 404, "אין מיקום — לא ממציאים תקריב"
-    served = client.get("/api/batches/bat_api").json()["records"][0]["fields"]["national_id"]
-    assert {r["model"]: r["verified"] for r in served["regions"]} == {
-        "a": True, "claude-sonnet-5-5": False,
-    }
-
-
-def test_api_add_extra_value_and_approve_empty_clear_the_remarks(api):
+def test_api_human_fix_and_approve_empty(api):
     client, record = api
     field = record.fields["commitment_numbers"]
-    field.values, field.extra_values, field.notes = ["111"], ["222"], ["extra_value"]
+    field.values, field.reasons = ["111"], ["illegible"]
     body = client.patch(f"/api/records/{record.record_id}",
                         json={"field": "commitment_numbers", "values": ["111", "222"]}).json()
     served = body["records"][0]["fields"]["commitment_numbers"]
     assert served["values"] == ["111", "222"] and served["state"] == STATE_APPROVED
-    assert served["notes"] == [] and served["extra_values"] == []
+    assert served["reasons"] == [], "תיקון אנושי מנקה את הסימונים"
 
     empty = record.fields["central_numbers"]
     assert empty.reasons == ["not_on_form"]
@@ -1229,7 +823,7 @@ def test_api_add_extra_value_and_approve_empty_clear_the_remarks(api):
 
 def one_reader(*readings_):
     record = FormRecord.empty("b", SOURCE, 1)
-    combine(record, list(readings_), flag_single_reader=False)
+    combine(record, readings_[0])
     validate_record(record, today=date(2026, 10, 14))
     return record
 
@@ -1238,7 +832,6 @@ def test_single_reader_sure_value_keeps_its_normal_colour():
     r = one_reader(reading("claude-opus-5-5", commitment_numbers=["730578626"]))
     field = r.fields["commitment_numbers"]
     assert field.values == ["730578626"] and field.state == STATE_OK
-    assert "single_reader" not in field.reasons, "קורא אחד במכוון אינו תקלה"
 
 
 @pytest.mark.parametrize("level, value", [("partial", "730578626"), ("clear", "7305?8626")])
@@ -1272,45 +865,43 @@ def test_single_reader_keeps_every_value_and_local_rules_still_run():
 def test_default_setup_is_one_opus_reader(monkeypatch):
     from app.config import load_settings
 
-    for name in ("JUDGE_A_MODEL", "JUDGE_B_MODEL", "JUDGE_EFFORT", "JUDGE_B_EFFORT",
-                 "ENHANCE_INK", "MAX_COST_PER_BATCH_USD"):
+    for name in ("READER_MODEL", "JUDGE_A_MODEL", "READER_EFFORT", "JUDGE_EFFORT",
+                 "JUDGE_B_EFFORT", "MAX_COST_PER_BATCH_USD"):
         monkeypatch.delenv(name, raising=False)
     s = load_settings()
-    assert s.judges == ["claude-opus-5-5"]
+    assert s.reader_model == "claude-opus-5-5"
     assert s.claude_effort == "high"
-    assert s.enhance_ink is False
     assert s.max_cost_per_batch_usd == 10.0
 
 
-def test_second_judge_is_one_line_in_env(monkeypatch):
+def test_old_env_names_still_work(monkeypatch):
     from app.config import load_settings
 
-    monkeypatch.setenv("JUDGE_B_MODEL", "gemini-3.8-flash")
-    assert load_settings().judges == ["claude-opus-5-5", "gemini-3.8-flash"]
+    monkeypatch.delenv("READER_MODEL", raising=False)
+    monkeypatch.delenv("READER_EFFORT", raising=False)
+    monkeypatch.setenv("JUDGE_A_MODEL", "claude-sonnet-5-5")
+    monkeypatch.setenv("JUDGE_EFFORT", "MEDIUM")
+    s = load_settings()
+    assert (s.reader_model, s.claude_effort) == ("claude-sonnet-5-5", "medium")
 
 
-def test_build_judges_picks_the_adapter_by_model_name(monkeypatch):
+def test_build_reader_is_the_configured_claude_model(monkeypatch):
     from app.providers.claude_vision import ClaudeExtractionProvider
-    from app.providers.gemini_vision import GeminiExtractionProvider
 
-    monkeypatch.setattr(pipeline, "SETTINGS", _settings(
-        judge_a_model="claude-opus-5-5", judge_b_model="", anthropic_api_key="k"))
-    judges, problems = pipeline.build_judges()
-    assert problems == [] and [type(j) for j in judges] == [ClaudeExtractionProvider]
-    assert judges[0].model == "claude-opus-5-5"
+    monkeypatch.setattr(pipeline, "SETTINGS", _settings(reader_model="claude-opus-5-5", anthropic_api_key="k"))
+    reader, problem = pipeline.build_reader()
+    assert problem == "" and isinstance(reader, ClaudeExtractionProvider)
+    assert reader.model == "claude-opus-5-5"
 
-    monkeypatch.setattr(pipeline, "SETTINGS", _settings(
-        judge_a_model="claude-opus-5-5", judge_b_model="gemini-3.8-flash",
-        anthropic_api_key="k", gemini_api_key="g"))
-    judges, _ = pipeline.build_judges()
-    assert [type(j) for j in judges] == [ClaudeExtractionProvider, GeminiExtractionProvider]
+    monkeypatch.setattr(pipeline, "SETTINGS", _settings(anthropic_api_key=""))
+    monkeypatch.setattr("app.providers.claude_vision.SETTINGS", _settings(anthropic_api_key=""))
+    reader, problem = pipeline.build_reader()
+    assert reader is None and "ANTHROPIC_API_KEY" in problem
 
-
-def test_batch_with_one_configured_reader_has_no_single_reader_flags(tmp_path, monkeypatch):
+def test_batch_with_one_reader_keeps_sure_values_in_normal_colour(tmp_path, monkeypatch):
     monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
-    monkeypatch.setattr(pipeline, "SETTINGS", _settings(judge_a_model="claude-opus-5-5", judge_b_model=""))
     judge = Judge("claude-opus-5-5", reading("claude-opus-5-5", commitment_numbers=["730578626"]))
-    monkeypatch.setattr(pipeline, "build_judges", lambda: ([judge], []))
+    monkeypatch.setattr(pipeline, "build_reader", lambda: (judge, ""))
     batch = Batch(batch_id="bat_one")
     source = SourceFile(index=1, filename="f.png", kind="png", sha256="")
     batch.sources.append(source)
@@ -1319,7 +910,6 @@ def test_batch_with_one_configured_reader_has_no_single_reader_flags(tmp_path, m
     pipeline._process("bat_one")
     record = batch.records[0]
     assert record.fields["commitment_numbers"].state == STATE_OK
-    assert all("single_reader" not in f.reasons for f in record.fields.values())
     assert not batch.warnings
     store.delete("bat_one")
 
@@ -1353,7 +943,7 @@ def test_zero_budget_cap_means_no_cap(tmp_path, monkeypatch):
         source = SourceFile(index=page, filename=f"{page}.png", kind="png", sha256="")
         batch.sources.append(source)
         pages.append((source, 1, png(tmp_path / f"p{page}.png")))
-    results = pipeline._extract_all(Panel([judge]), batch, pages)
+    results = pipeline._extract_all(Reader(judge), batch, pages)
     assert all(r is not None for r in results) and batch.budget_skipped_pages == 0
 
 
@@ -1388,10 +978,10 @@ def test_saved_answer_survives_a_restart_and_costs_nothing(tmp_path):
     source = SourceFile(index=1, filename="f.pdf", sha256="d" * 64)
     judge = Judge("claude-opus-5-5", _paid_answer(national_id=["001122334"]))
     image = png(tmp_path / "p.png")
-    first = read_form(Panel([judge]), image, "b", source, 1)
+    first = read_form(Reader(judge), image, "b", source, 1)
 
     pipeline._READ_CACHE.clear()  # כמו הפעלה מחדש של השרת
-    second = read_form(Panel([judge]), image, "b", source, 1)
+    second = read_form(Reader(judge), image, "b", source, 1)
 
     assert judge.calls == 1, "אחרי הפעלה מחדש — לא נשלח שוב למודל"
     assert first.cost_usd == pytest.approx(0.05) and second.cost_usd == 0.0
@@ -1407,12 +997,12 @@ def test_new_prompt_or_model_is_read_again_after_restart(tmp_path):
     image = png(tmp_path / "p.png")
     old = Judge("claude-opus-5-5", _paid_answer())
     old.prompt_version = "extract_v3-aaaa"
-    read_form(Panel([old]), image, "b", source, 1)
+    read_form(Reader(old), image, "b", source, 1)
 
     pipeline._READ_CACHE.clear()
     new = Judge("claude-opus-5-5", _paid_answer())
     new.prompt_version = "extract_v3-bbbb"
-    read_form(Panel([new]), image, "b", source, 1)
+    read_form(Reader(new), image, "b", source, 1)
     assert new.calls == 1, "הוראות חדשות — קריאה חדשה, לא תשובה ישנה"
     pipeline._READ_CACHE.clear()
 
@@ -1422,12 +1012,12 @@ def test_damaged_saved_answer_is_just_read_again(tmp_path):
     source = SourceFile(index=1, filename="f.pdf", sha256="f0" * 32)
     image = png(tmp_path / "p.png")
     judge = Judge("claude-opus-5-5", _paid_answer())
-    read_form(Panel([judge]), image, "b", source, 1)
+    read_form(Reader(judge), image, "b", source, 1)
     for saved in pipeline.READ_CACHE_DIR.glob("*.json"):
         saved.write_text("{ שבור", encoding="utf-8")
 
     pipeline._READ_CACHE.clear()
-    record = read_form(Panel([judge]), image, "b", source, 1)
+    record = read_form(Reader(judge), image, "b", source, 1)
     assert judge.calls == 2 and not record.error
     pipeline._READ_CACHE.clear()
 
@@ -1435,7 +1025,7 @@ def test_damaged_saved_answer_is_just_read_again(tmp_path):
 def test_file_without_fingerprint_is_not_saved(tmp_path):
     pipeline._READ_CACHE.clear()
     judge = Judge("claude-opus-5-5", _paid_answer())
-    read_form(Panel([judge]), png(tmp_path / "p.png"), "b", SOURCE, 1)
+    read_form(Reader(judge), png(tmp_path / "p.png"), "b", SOURCE, 1)
     assert not pipeline.READ_CACHE_DIR.exists() or not list(pipeline.READ_CACHE_DIR.glob("*.json"))
 
 
@@ -1510,19 +1100,19 @@ def test_turned_page_does_not_reuse_an_answer_from_before_it_was_turned(tmp_path
     source = SourceFile(index=1, filename="25.pdf", sha256="2" * 64)
     image = png(tmp_path / "page-001.png")
     old = Judge("claude-opus-5-5", _paid_answer())
-    read_form(Panel([old]), image, "b", source, 1)  # נקרא כשהדף היה על הצד
+    read_form(Reader(old), image, "b", source, 1)  # נקרא כשהדף היה על הצד
 
     turn_note_path(image).write_text("הדף סובב ב-90° (זוהה אוטומטית)", encoding="utf-8")
     pipeline._READ_CACHE.clear()
     new = Judge("claude-opus-5-5", _paid_answer())
-    record = read_form(Panel([new]), image, "b", source, 1)
+    record = read_form(Reader(new), image, "b", source, 1)
     assert new.calls == 1, "דף ישר = תמונה חדשה; התשובה הישנה עם המיקומים השגויים לא חוזרת"
     assert "סובב" in record.straightened
 
     # דף שלא נגעו בו שומר על אותו מפתח — ולא עולה שוב
     pipeline._READ_CACHE.clear()
     again = Judge("claude-opus-5-5", _paid_answer())
-    read_form(Panel([again]), image, "b", source, 1)
+    read_form(Reader(again), image, "b", source, 1)
     assert again.calls == 0
     pipeline._READ_CACHE.clear()
 
@@ -1599,9 +1189,9 @@ def test_same_page_in_a_bigger_file_is_not_read_again(tmp_path):
     inside.write_bytes(alone.read_bytes())  # אותו עמוד, פיקסל לפיקסל
 
     judge = Judge("claude-opus-5-5", _paid_answer(national_id=["001122334"]))
-    first = read_form(Panel([judge]), alone, "b1", single, 1)
+    first = read_form(Reader(judge), alone, "b1", single, 1)
     pipeline._READ_CACHE.clear()  # גם אחרי הפעלה מחדש
-    second = read_form(Panel([judge]), inside, "b2", bundle, 7)
+    second = read_form(Reader(judge), inside, "b2", bundle, 7)
 
     assert judge.calls == 1, "הטופס כבר נקרא בנפרד — בקובץ הגדול הוא חוזר בחינם"
     assert first.cost_usd == pytest.approx(0.05) and second.cost_usd == 0.0
@@ -1619,8 +1209,8 @@ def test_a_different_page_image_is_read(tmp_path):
     page.putpixel((5, 5), (0, 0, 0))  # פיקסל אחד שונה = סריקה אחרת
     page.save(b)
     judge = Judge("claude-opus-5-5", _paid_answer())
-    read_form(Panel([judge]), a, "b", source, 1)
-    read_form(Panel([judge]), b, "b", SourceFile(index=2, filename="g.pdf", sha256="d4" * 32), 1)
+    read_form(Reader(judge), a, "b", source, 1)
+    read_form(Reader(judge), b, "b", SourceFile(index=2, filename="g.pdf", sha256="d4" * 32), 1)
     assert judge.calls == 2
     pipeline._READ_CACHE.clear()
 
@@ -1635,7 +1225,7 @@ def test_answer_saved_under_the_old_key_is_still_free(tmp_path):
     old_key = (source.sha256, 1, judge.model, None, PROMPT_VERSION)  # המפתח לפני השינוי
     pipeline._save(old_key, _paid_answer(national_id=["001122334"]))
 
-    record = read_form(Panel([judge]), image, "b", source, 1)
+    record = read_form(Reader(judge), image, "b", source, 1)
     assert judge.calls == 0 and record.cost_usd == 0.0
     assert record.fields["national_id"].values == ["001122334"]
     pipeline._READ_CACHE.clear()
@@ -1750,3 +1340,138 @@ def test_checks_never_change_a_value():
     assert r.fields["sample_received_date"].values == ["31/02/2026"]
     assert r.fields["first_name"].values == ["ישראל3"]
     assert "id_length" in r.fields["national_id"].reasons
+
+
+
+# ------------------------------------- 18/10/2026: UI upgrades — server side
+
+
+def test_undo_restores_value_state_and_reasons(api):
+    client, record = api
+    field = record.fields["commitment_numbers"]
+    field.values, field.state, field.reasons = ["111"], STATE_REVIEW, ["illegible"]
+    client.patch(f"/api/records/{record.record_id}", json={"field": "commitment_numbers", "values": ["222"]})
+    assert field.values == ["222"] and field.state == STATE_APPROVED
+
+    body = client.post(f"/api/records/{record.record_id}/undo", json={"field": "commitment_numbers"}).json()
+    served = body["records"][0]["fields"]["commitment_numbers"]
+    assert served["values"] == ["111"] and served["state"] == STATE_REVIEW
+    assert served["reason_codes"] == ["illegible"]
+    assert client.post(f"/api/records/{record.record_id}/undo",
+                       json={"field": "commitment_numbers"}).status_code == 409, "אין עוד מה לבטל"
+
+
+def test_undo_of_an_approval(api):
+    client, record = api
+    field = record.fields["central_numbers"]
+    field.state, field.reasons = STATE_REVIEW, ["not_on_form"]
+    client.patch(f"/api/records/{record.record_id}", json={"field": "central_numbers", "approve": True})
+    assert field.state == STATE_APPROVED
+    client.post(f"/api/records/{record.record_id}/undo", json={"field": "central_numbers"})
+    assert field.state == STATE_REVIEW and field.reasons == ["not_on_form"]
+
+
+def test_thumbnail_is_small_and_made_once(api):
+    client, record = api
+    url = "/api/batches/bat_api/sources/1/pages/1/thumb"
+    res = client.get(url)
+    assert res.status_code == 200 and res.headers["content-type"] == "image/jpeg"
+    import io
+
+    with Image.open(io.BytesIO(res.content)) as thumb:
+        assert thumb.width <= 240
+    made = pipeline.page_image_path("bat_api", 1, 1).with_name("page-001.thumb.jpg")
+    first = made.stat().st_mtime_ns
+    client.get(url)
+    assert made.stat().st_mtime_ns == first, "נוצרת פעם אחת ונשמרת"
+    assert client.get("/api/batches/bat_api/sources/1/pages/9/thumb").status_code == 404
+
+
+def test_records_appear_while_the_rest_are_read_and_end_in_page_order(tmp_path):
+    import threading
+
+    gate = threading.Event()
+
+    class SlowFirst:
+        model = "claude-opus-5-5"
+
+        def __init__(self):
+            self.seen = []
+
+        def extract(self, image_path):
+            if "p1" in image_path.name:
+                gate.wait(5)  # העמוד הראשון מתעכב
+            return reading("claude-opus-5-5", commitment_numbers=[image_path.stem])
+
+    batch = Batch(batch_id="bat_live")
+    pages = []
+    for i in (1, 2, 3):
+        source = SourceFile(index=i, filename=f"{i}.png", kind="png", sha256="")
+        batch.sources.append(source)
+        pages.append((source, 1, png(tmp_path / f"p{i}.png")))
+    batch.pages = [{"source_index": i, "page_number": 1, "status": "queued", "record_id": ""} for i in (1, 2, 3)]
+
+    worker = threading.Thread(target=pipeline._extract_all, args=(Reader(SlowFirst()), batch, pages))
+    worker.start()
+    deadline = __import__("time").time() + 5
+    while len(batch.records) < 2 and __import__("time").time() < deadline:
+        __import__("time").sleep(0.02)
+    assert len(batch.records) == 2, "שני טפסים מוכנים — מופיעים לפני שהראשון נגמר"
+    assert batch.pages[0]["status"] == "reading"
+    gate.set()
+    worker.join(5)
+    assert [r.source_index for r in batch.records] == [1, 2, 3], "בסוף — לפי סדר העמודים"
+    assert [p["status"] for p in batch.pages] == ["done"] * 3
+    assert all(p["record_id"] for p in batch.pages)
+
+
+def test_sample_form_comes_from_saved_answers_without_a_paid_call(tmp_path, monkeypatch):
+    from app import api as api_module
+
+    monkeypatch.setattr("app.config.BATCHES_DIR", tmp_path / "batches")
+    monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
+    sample = tmp_path / "demo-form.png"
+    png(sample, size=(1700, 2400))
+    monkeypatch.setattr(api_module, "SAMPLE_PATH", sample)
+
+    class NoMoney:
+        model = "claude-opus-5-5"
+        prompt_version = "extract_v3-test"
+        calls = 0
+
+        def extract(self, image_path):
+            NoMoney.calls += 1
+            return reading("claude-opus-5-5", commitment_numbers=["730578626"])
+
+    monkeypatch.setattr(pipeline, "build_reader", lambda: (NoMoney(), ""))
+    monkeypatch.setattr(pipeline, "start", lambda batch_id: pipeline._process(batch_id))
+    client = TestClient(api_module.app)
+    assert client.get("/api/config").json()["sample"] is True
+
+    first = client.post("/api/batches/sample").json()["batch_id"]
+    second = client.post("/api/batches/sample").json()["batch_id"]
+    assert NoMoney.calls == 1, "הפעם השנייה — מהתשובה השמורה, בלי קריאה למודל"
+    for batch_id in (first, second):
+        data = client.get(f"/api/batches/{batch_id}").json()
+        assert data["records"][0]["fields"]["commitment_numbers"]["values"] == ["730578626"]
+        assert data["pages"][0]["status"] == "done"
+        store.delete(batch_id)
+
+
+def test_no_sample_button_without_a_sample_file(monkeypatch, tmp_path):
+    from app import api as api_module
+
+    monkeypatch.setattr(api_module, "SAMPLE_PATH", tmp_path / "missing.pdf")
+    client = TestClient(api_module.app)
+    assert client.get("/api/config").json()["sample"] is False
+    assert client.post("/api/batches/sample").status_code == 404
+
+
+def test_index_serves_split_static_files():
+    from app import api as api_module
+
+    client = TestClient(api_module.app)
+    html = client.get("/").text
+    assert "/static/app.css?v=" in html and "/static/app.js?v=" in html and "{{v}}" not in html
+    assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/app.css").status_code == 200

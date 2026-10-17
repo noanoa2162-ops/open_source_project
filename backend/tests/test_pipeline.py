@@ -162,7 +162,7 @@ def test_fatal_error_carries_its_flag():
 
 
 def test_stub_provider_fills_the_record(tmp_path):
-    from app.pipeline import Panel, read_form
+    from app.pipeline import Reader, read_form
 
     provider = StubProvider(
         {
@@ -175,7 +175,7 @@ def test_stub_provider_fills_the_record(tmp_path):
             "sending_entity": ["מאוחדת"],
         }
     )
-    record = read_form(Panel([provider]), _png(tmp_path / "page-001.png"), "b1", SOURCE, 1)
+    record = read_form(Reader(provider), _png(tmp_path / "page-001.png"), "b1", SOURCE, 1)
 
     assert record.error == ""
     assert record.fields["first_name"].values == ["שרה"]
@@ -186,7 +186,7 @@ def test_stub_provider_fills_the_record(tmp_path):
 
 
 def test_provider_failure_does_not_lose_the_record(tmp_path):
-    from app.pipeline import Panel, read_form
+    from app.pipeline import Reader, read_form
 
     class Broken:
         name = "broken"
@@ -195,9 +195,9 @@ def test_provider_failure_does_not_lose_the_record(tmp_path):
         def extract(self, image_path):
             raise ExtractionError("אין יתרת קרדיט", fatal=True)
 
-    panel = Panel([Broken()])
-    record = read_form(panel, _png(tmp_path / "p.png"), "b1", SOURCE, 3)
-    assert panel.exhausted, "שגיאת חשבון מוציאה את השופט מהמשחק"
+    reader = Reader(Broken())
+    record = read_form(reader, _png(tmp_path / "p.png"), "b1", SOURCE, 3)
+    assert reader.exhausted, "שגיאת חשבון עוצרת את הקורא"
     assert record.page_number == 3
     assert "קרדיט" in record.error
     assert record.review_count == len(FIELDS)
@@ -236,8 +236,7 @@ def _drop(
     monkeypatch.setattr("app.config.BATCHES_DIR", tmp_path / "batches")
     monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
     chosen = provider or StubProvider({"first_name": ["שרה"]})
-    judges = chosen if isinstance(chosen, list) else [chosen]
-    monkeypatch.setattr(pipeline, "build_judges", lambda: (judges, []))
+    monkeypatch.setattr(pipeline, "build_reader", lambda: (chosen, ""))
     if parallel is not None:
         monkeypatch.setattr(
             pipeline, "SETTINGS", replace(pipeline.SETTINGS, max_parallel_calls=parallel)
@@ -303,7 +302,7 @@ def test_a_rejected_file_does_not_sink_the_others(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.BATCHES_DIR", tmp_path / "batches")
     monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
     monkeypatch.setattr(
-        pipeline, "build_judges", lambda: ([StubProvider({"first_name": ["שרה"]})], [])
+        pipeline, "build_reader", lambda: (StubProvider({"first_name": ["שרה"]}), "")
     )
 
     batch = Batch(batch_id="bat_mixed")
@@ -454,78 +453,3 @@ def test_progress_counts_every_finished_page(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- provider
 
 
-class _FakeCompletions:
-    def __init__(self, outcomes):
-        self._outcomes = list(outcomes)
-        self.calls = 0
-
-    def parse(self, **kwargs):
-        self.calls += 1
-        outcome = self._outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-
-def _provider_with(outcomes, monkeypatch):
-    from types import SimpleNamespace
-
-    from app.providers import openai_vision as ov
-
-    monkeypatch.setattr(ov.time, "sleep", lambda s: None)  # בלי המתנה אמיתית
-    provider = ov.OpenAIExtractionProvider(api_key="test", model="stub")
-    fake = _FakeCompletions(outcomes)
-    provider._client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
-    return provider, fake
-
-
-def _good_completion():
-    from types import SimpleNamespace
-
-    from app.providers.reading import FieldReading, PageReading
-
-    empty = FieldReading(values=[], legibility="absent")
-    parsed = PageReading(
-        template="kupah_form",
-        **{k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "upside_down", "note")},
-    )
-    parsed.first_name = FieldReading(values=["שרה"], legibility="clear")
-    message = SimpleNamespace(parsed=parsed, refusal=None, content="")
-    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-
-class _ApiError(Exception):
-    def __init__(self, status, message):
-        super().__init__(message)
-        self.status_code = status
-        self.message = message
-
-
-def test_transient_rate_limit_is_retried(tmp_path, monkeypatch):
-    provider, fake = _provider_with(
-        [_ApiError(429, "Rate limit reached"), _good_completion()], monkeypatch
-    )
-    result = provider.extract(_png(tmp_path / "p.png"))
-
-    assert fake.calls == 2
-    assert result.values["first_name"] == ["שרה"]
-
-
-def test_running_out_of_money_is_never_retried(tmp_path, monkeypatch):
-    provider, fake = _provider_with(
-        [_ApiError(429, "You exceeded your current quota (insufficient_quota)")], monkeypatch
-    )
-    with pytest.raises(ExtractionError) as caught:
-        provider.extract(_png(tmp_path / "p.png"))
-
-    assert caught.value.fatal is True
-    assert fake.calls == 1, "נגמר הכסף — ניסיון חוזר רק שורף עוד"
-
-
-def test_rate_limit_that_never_clears_gives_up_without_stopping_the_batch(tmp_path, monkeypatch):
-    provider, fake = _provider_with([_ApiError(429, "Rate limit reached")] * 3, monkeypatch)
-    with pytest.raises(ExtractionError) as caught:
-        provider.extract(_png(tmp_path / "p.png"))
-
-    assert caught.value.fatal is False, "עומס רגעי הוא בעיה של טופס אחד, לא של החשבון"
-    assert fake.calls == 3

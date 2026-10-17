@@ -1,742 +1,179 @@
 <!doctype html>
-<html lang="he" dir="rtl">
+<html lang="he" dir="rtl" data-theme="light" data-size="1">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>טופס למידע — חילוץ טפסי התחייבות</title>
-<style>
-:root{
-  --navy:#133654; --navy-2:#1d4a72; --teal:#1a8f8f; --amber:#b35c09;
-  --amber-bg:#fff4e5; --amber-line:#f0c891;
-  --ink:#16222e; --muted:#5d6f80; --line:#dde5ec; --bg:#f2f6f9; --card:#fff;
-  --ok:#2d7a4f;
-}
-*{box-sizing:border-box}
-html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--ink);
-  font-family:"Segoe UI",system-ui,Arial,sans-serif;font-size:15px;line-height:1.5}
-button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);
-  background:#fff;color:var(--navy);padding:9px 18px;transition:.12s}
-button:hover:not(:disabled){background:#eaf2f8;border-color:var(--navy-2)}
-button:disabled{opacity:.45;cursor:not-allowed}
-button:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
-.primary{background:var(--navy);color:#fff;border-color:var(--navy)}
-.primary:hover:not(:disabled){background:var(--navy-2);color:#fff}
-
-header{background:var(--navy);color:#fff;padding:0 26px;height:62px;
-  display:flex;align-items:center;gap:16px;box-shadow:0 1px 6px rgba(19,54,84,.18)}
-header h1{font-size:19px;margin:0;font-weight:600;letter-spacing:-.2px}
-header .dot{width:9px;height:9px;border-radius:50%;background:var(--teal)}
-header .demo{margin-inline-start:auto;background:#b35c09;color:#fff;
-  font-size:12px;padding:4px 11px;border-radius:5px;font-weight:600}
-header .model{font-size:12.5px;color:#a9c6de;direction:ltr}
-
-main{max-width:1500px;margin:0 auto;padding:22px 26px 60px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px}
-
-#drop{padding:52px 28px;text-align:center;border:2px dashed #b9cad8;
-  background:#fff;border-radius:12px;transition:.15s;cursor:pointer}
-#drop.over{border-color:var(--teal);background:#eefafa}
-#drop h2{margin:0 0 8px;font-size:21px;color:var(--navy)}
-#drop p{margin:0 0 20px;color:var(--muted)}
-#drop .icon{font-size:40px;line-height:1;margin-bottom:12px}
-#drop small{display:block;margin-top:16px;color:var(--muted);font-size:12.5px}
-
-#progress{padding:26px 28px;margin-top:18px}
-.bar{height:9px;background:#e6edf3;border-radius:5px;overflow:hidden;margin:14px 0 8px}
-.bar div{height:100%;background:linear-gradient(90deg,var(--teal),var(--navy-2));
-  width:0;transition:width .35s ease}
-.prow{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
-.prow strong{color:var(--navy);font-size:16px}
-.prow span{color:var(--muted);font-size:13px}
-.sub{color:var(--muted);font-size:13px}
-
-#bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:18px 0 14px}
-.chip{background:#fff;border:1px solid var(--line);border-radius:20px;
-  padding:6px 15px;font-size:13.5px;color:var(--muted)}
-.chip b{color:var(--navy)}
-.chip.warn{background:var(--amber-bg);border-color:var(--amber-line);color:var(--amber)}
-.chip.warn b{color:var(--amber)}
-#bar .spacer{margin-inline-start:auto}
-
-.split{display:grid;grid-template-columns:1fr 420px;gap:18px;align-items:start}
-@media(max-width:1180px){.split{grid-template-columns:1fr}}
-
-.tablewrap{overflow-x:auto;border-radius:10px}
-table{border-collapse:separate;border-spacing:0;width:100%;font-size:14px;background:#fff}
-th{background:var(--navy);color:#fff;font-weight:600;font-size:13px;
-  padding:11px 10px;text-align:right;position:sticky;top:0;white-space:nowrap}
-td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;
-  max-width:190px;word-break:break-word}
-tbody tr{cursor:pointer}
-tbody tr:hover td{background:#f6fafc}
-tbody tr.sel td{background:#eaf4fa}
-td.page{color:var(--muted);font-size:12.5px;text-align:center;white-space:nowrap}
-td.review{background:var(--amber-bg);color:var(--amber);font-weight:600}
-tbody tr.sel td.review{background:#ffeccf}
-td.approved{color:var(--ok);font-weight:600}
-tr.noterow td{background:#fffaf2;color:var(--amber);font-size:12.5px;
-  padding:6px 12px;border-bottom:1px solid var(--amber-line)}
-tr.noterow:hover td{background:#fffaf2}
-td.page{max-width:150px;overflow:hidden;text-overflow:ellipsis}
-#pFiles{list-style:none;margin:14px 0 0;padding:0;font-size:13px;color:var(--muted)}
-#pFiles li{padding:4px 0;border-top:1px solid var(--line)}
-#pFiles .good{color:var(--teal);font-weight:600}
-#pFiles .bad{color:var(--amber);font-weight:600}
-td .empty{color:var(--amber);font-style:italic;font-weight:600;opacity:.85}
-td .why{display:block;font-size:11.5px;font-weight:400;color:var(--amber);margin-top:3px}
-td input{width:100%;font:inherit;padding:5px 7px;border:2px solid var(--teal);
-  border-radius:5px;background:#fff;color:var(--ink);direction:rtl}
-td.cell{position:relative;padding-inline-end:28px}
-td.cell.focus{outline:2px solid var(--teal);outline-offset:-2px}
-.zoom{position:absolute;inset-inline-end:3px;top:5px;border:none;background:none;
-  padding:2px 4px;font-size:13px;opacity:.4;cursor:zoom-in}
-td.cell:hover .zoom,.zoom:focus-visible{opacity:1;background:none}
-.cands{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
-.cand{font:inherit;font-size:12.5px;font-weight:600;padding:3px 9px;border-radius:5px;
-  border:1px solid var(--amber-line);background:#fff;color:var(--ink);cursor:pointer}
-.cand:hover{border-color:var(--amber);background:#fff8ee}
-mark.q{background:#ffd27a;color:#6b3a00;border-radius:2px;padding:0 2px;font-weight:700}
-/* הערה רכה: ספק קטן / ערך נוסף. התא לא כתום — רק שורה קטנה מתחת לערך */
-td .soft{display:block;font-size:11.5px;font-weight:400;color:#2f5f86;margin-top:3px}
-td .soft::before{content:"ⓘ ";color:var(--teal)}
-.addx,.okempty{font:inherit;font-size:11.5px;padding:2px 8px;margin-top:4px;border-radius:5px;
-  border:1px solid #b8d3e6;background:#f3f9fd;color:var(--navy);cursor:pointer}
-.addx:hover,.okempty:hover{border-color:var(--teal);background:#e6f4f4}
-.pv-box.b2{border-color:#7b61ff;box-shadow:none}
-.pv-lbl .src{display:inline-block;width:10px;height:10px;border-radius:2px;margin-inline-end:5px;
-  vertical-align:middle;border:2px solid #ff9f1a}
-.pv-lbl .src.b2{border-color:#7b61ff}
-.pv-lbl .unv{color:#ffcf8a}
-.ink-toggle{font-size:11.5px;padding:2px 9px;margin-inline-start:8px;border-radius:5px;
-  background:#2a3d4d;color:#cfe0ee;border:1px solid #50667a}
-.ink-toggle.on{background:#1a8f8f;color:#fff;border-color:#1a8f8f}
-.reads{margin-top:7px;padding-top:5px;border-top:1px dashed var(--line);
-  font-size:11.5px;font-weight:400;color:var(--muted);line-height:1.5}
-.reads div{white-space:nowrap}
-.reads b{color:var(--navy);font-weight:600}
-.reads .lv{opacity:.85}
-body.hide-reads .reads{display:none}
-#compare.on{background:#eaf4fa;border-color:var(--teal);color:var(--teal)}
-td.acts{white-space:nowrap;text-align:center}
-.verify{font-size:12px;padding:5px 9px}
-.verified{color:var(--ok);font-weight:600;font-size:12.5px}
-.pv-sec{margin-bottom:10px}
-.pv-lbl{color:#cfe0ee;font-size:12px;margin:2px 2px 6px}
-.pv-pagewrap,.pv-cropwrap{display:flex;align-items:center;justify-content:center}
-/* סיבוב תצוגה בלבד: הדף, הריבוע והתקריב מסתובבים יחד */
-.pv-page,.pv-cropwrap img{transition:transform .2s ease}
-/* overflow:hidden — ההכהיה סביב הריבוע נשארת על הטופס ולא דולפת על ההגדלה שמתחת */
-.pv-page{position:relative;display:inline-block;max-width:100%;overflow:hidden;
-  vertical-align:top;line-height:0}
-#preview .pv-page img{width:auto;max-width:100%;max-height:44vh;display:block}
-.pv-box{position:absolute;border:3px solid #ff9f1a;border-radius:3px;pointer-events:none;
-  box-shadow:0 0 0 9999px rgba(10,20,30,.28)}
-#preview .pv-crop img{background:#fff;max-height:30vh;width:auto;max-width:100%;margin:0 auto}
-.pv-missing{color:#cfe0ee;font-size:12.5px;padding:16px;text-align:center;
-  border:1px dashed #50667a;border-radius:6px}
-
-#preview{position:sticky;top:18px;padding:14px;max-height:calc(100vh - 110px);
-  display:flex;flex-direction:column}
-#preview h3{margin:0 0 10px;font-size:14px;color:var(--navy);
-  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-#preview .hint{color:var(--muted);font-size:12.5px;font-weight:400}
-#preview .frame{flex:1;overflow:auto;background:#1e2d3a;border-radius:7px;padding:8px;
-  min-height:300px}
-#preview img{width:100%;display:block;border-radius:4px}
-#preview .ph{color:#90a4b5;text-align:center;padding:60px 20px;font-size:13.5px}
-
-.notice{padding:14px 18px;border-radius:9px;margin-bottom:16px;font-size:14px}
-.notice.err{background:#fdecea;border:1px solid #f3b7b0;color:#8a1c10}
-.notice.single{background:#b3261e;border:none;color:#fff;font-size:15px}
-.notice.single b{font-size:16px}
-.notice.warn{background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--amber)}
-.notice a{color:inherit;font-weight:600}
-.notice b{display:block;margin-bottom:3px}
-.foot{margin-top:26px;color:var(--muted);font-size:12.5px;text-align:center;line-height:1.8}
-.hidden{display:none!important}
-</style>
+<link rel="stylesheet" href="/static/app.css?v={{v}}">
 </head>
 <body>
+<a class="skip" href="#main">דילוג לתוכן</a>
+
 <header>
-  <span class="dot"></span>
+  <span class="dot" aria-hidden="true"></span>
   <h1>טופס למידע</h1>
   <span class="model" id="modelName"></span>
+  <span class="grow"></span>
+  <div class="tools" role="group" aria-label="תצוגה">
+    <button class="tool" id="sizeDown" title="טקסט קטן יותר" aria-label="טקסט קטן יותר">A−</button>
+    <button class="tool" id="sizeUp" title="טקסט גדול יותר" aria-label="טקסט גדול יותר">A+</button>
+    <button class="tool" id="themeBtn" title="מצב כהה / בהיר" aria-label="מצב כהה או בהיר">◐</button>
+    <button class="tool" id="helpBtn" title="הסבר קצר על המסך" aria-label="הסבר קצר על המסך">?</button>
+  </div>
   <span class="demo">דמו להאקתון</span>
 </header>
 
-<main>
+<main id="main">
   <div id="notices"></div>
 
-  <div id="drop" class="card">
-    <div class="icon">📄</div>
+  <!-- מסך פתיחה -->
+  <section id="drop" class="card" aria-label="העלאת טפסים">
+    <svg class="hero" viewBox="0 0 320 120" aria-hidden="true">
+      <g class="sheets">
+        <rect x="18" y="22" width="62" height="80" rx="6" class="sheet s3"/>
+        <rect x="30" y="14" width="62" height="80" rx="6" class="sheet s2"/>
+        <rect x="42" y="6" width="62" height="80" rx="6" class="sheet s1"/>
+        <path d="M54 26h38M54 38h30M54 50h38M54 62h22" class="ink"/>
+        <path d="M60 74h30" class="ink hand"/>
+      </g>
+      <path d="M128 56h56" class="arrow"/>
+      <path d="M176 46l12 10-12 10" class="arrow"/>
+      <g class="grid">
+        <rect x="206" y="18" width="98" height="78" rx="7" class="tablebox"/>
+        <path d="M206 38h98M206 58h98M206 78h98M240 18v78M272 18v78" class="gridline"/>
+        <rect x="241" y="39" width="30" height="18" class="hl"/>
+        <rect x="273" y="59" width="30" height="18" class="ok"/>
+      </g>
+    </svg>
     <h2>גררו לכאן טפסי התחייבות</h2>
     <p>אפשר כמה קבצים יחד — תמונות, קובצי PDF, או שילוב של שניהם</p>
-    <button class="primary" id="browse">בחירת קבצים</button>
+    <div class="actions">
+      <button class="primary big" id="browse">בחירת קבצים</button>
+      <button class="big hidden" id="sampleBtn">▶ נסו עם טופס דוגמה</button>
+    </div>
     <input type="file" id="file" class="hidden" accept=".pdf,.jpg,.jpeg,.png" multiple>
     <small id="limits"></small>
-  </div>
+  </section>
 
-  <div id="progress" class="card hidden">
+  <!-- התקדמות חיה -->
+  <section id="progress" class="card hidden" aria-label="התקדמות הקריאה">
     <div class="prow">
       <strong id="pTitle">מעבד…</strong>
-      <span id="pCount"></span>
+      <span id="pCount" aria-live="polite"></span>
     </div>
     <div class="bar"><div id="pFill"></div></div>
-    <span class="sub" id="pHow">כל טופס נקרא בנפרד. כל שדה שהמנוע לא בטוח בו — יסומן לבדיקה.</span>
+    <div class="tiles" id="tiles"></div>
+    <div class="legend" aria-hidden="true">
+      <span><i class="lg done"></i> מוכן</span>
+      <span><i class="lg review"></i> יש מה לבדוק</span>
+      <span><i class="lg reading"></i> נקרא עכשיו</span>
+      <span><i class="lg queued"></i> בתור</span>
+    </div>
     <ul id="pFiles"></ul>
-  </div>
+  </section>
 
-  <div id="results" class="hidden">
-    <div id="bar">
-      <span class="chip">טפסים: <b id="cRecords">0</b></span>
-      <span class="chip">קבצים: <b id="cSources">0</b></span>
-      <span class="chip warn" id="cReviewChip">שדות לבדיקה: <b id="cReview">0</b></span>
-      <span class="chip">עלות: <b id="cCost">—</b></span>
-      <span class="chip">זמן: <b id="cTime">—</b></span>
-      <span class="chip">מקור: <b id="cFile"></b></span>
-      <span class="spacer"></span>
-      <button id="compare" class="on" title="להציג/להסתיר מה כל מודל קרא בכל שדה">השוואת מודלים</button>
+  <!-- תוצאות -->
+  <section id="results" class="hidden" aria-label="תוצאות">
+    <div class="toolbar">
+      <div class="seg" role="tablist" aria-label="מצב תצוגה">
+        <button role="tab" id="viewTable" aria-selected="true">▤ טבלה</button>
+        <button role="tab" id="viewForm" aria-selected="false">▣ טופס</button>
+      </div>
+      <div class="seg filters" role="group" aria-label="סינון">
+        <button data-filter="all" class="on">הכל <b id="nAll">0</b></button>
+        <button data-filter="review">⚠ לבדיקה <b id="nReview">0</b></button>
+        <button data-filter="approved">✓ מאושרים <b id="nApproved">0</b></button>
+      </div>
+      <label class="sender">גורם:
+        <select id="senderFilter" aria-label="סינון לפי גורם שולח"><option value="">כל הגורמים</option></select>
+      </label>
+      <span class="grow"></span>
       <button id="again">קובץ חדש</button>
       <button class="primary" id="download">הורדת קובץ Excel</button>
     </div>
 
-    <div class="split">
+    <div class="chips">
+      <span class="chip">טפסים <b id="cRecords">0</b></span>
+      <span class="chip">קבצים <b id="cSources">0</b></span>
+      <span class="chip warn" id="cReviewChip">שדות לבדיקה <b id="cReview">0</b></span>
+      <span class="chip">עלות <b id="cCost">—</b></span>
+      <span class="chip">זמן <b id="cTime">—</b></span>
+      <span class="chip src">מקור <b id="cFile"></b></span>
+    </div>
+
+    <!-- מצב טבלה -->
+    <div id="tableView" class="split">
       <div class="card tablewrap">
         <table>
           <thead><tr id="head"></tr></thead>
           <tbody id="body"></tbody>
         </table>
+        <div class="empty-filter hidden" id="emptyFilter">אין טפסים שמתאימים לסינון הזה.</div>
       </div>
-      <div class="card" id="preview">
-        <h3>מקור <span class="hint" id="pvHint">לחצו על שורה כדי לראות את הטופס</span></h3>
-        <div class="frame" id="pvFrame"><div class="ph">לא נבחרה שורה</div></div>
+      <aside class="card" id="preview" aria-label="המקור">
+        <h3>מקור <span class="hint" id="pvHint">לחצו על תא כדי לראות את הטופס והגדלה של השדה</span></h3>
+        <div class="frame" id="pvFrame"><div class="ph">לא נבחר טופס</div></div>
+      </aside>
+    </div>
+
+    <!-- מצב טופס אחד בכל פעם -->
+    <div id="formView" class="hidden">
+      <div class="formnav card">
+        <button id="prevForm" aria-label="הטופס הקודם">→ הקודם</button>
+        <div class="where">
+          <strong id="formWhere">טופס 1 מתוך 1</strong>
+          <span id="formSource" class="sub"></span>
+          <div class="dots" id="formDots" aria-hidden="true"></div>
+        </div>
+        <button id="nextForm" aria-label="הטופס הבא">הבא ←</button>
       </div>
+      <div class="formgrid">
+        <div class="card viewer">
+          <div class="frame" id="fvFrame"></div>
+        </div>
+        <div class="cardsCol">
+          <div class="cards" id="fvCards" role="list"></div>
+          <div class="formfoot">
+            <button class="primary big" id="fvApprove">✓ אשר את הטופס</button>
+            <span class="sub" id="fvApproveHint"></span>
+          </div>
+        </div>
+      </div>
+      <p class="keys">מקלדת: <kbd>←</kbd>/<kbd>→</kbd> טופס הבא/קודם · <kbd>↑</kbd>/<kbd>↓</kbd> שדה ·
+        <kbd>Enter</kbd> אישור · <kbd>E</kbd> תיקון · <kbd>Esc</kbd> ביטול</p>
     </div>
 
     <div class="foot">
-      <span id="footHow">תאים <b style="color:var(--amber)">כתומים</b> = המנוע לא בטוח, או שבדיקה אוטומטית
-      נכשלה (ת"ז, תאריך, גורם שולח) — תקנו או אשרו.</span> לחיצה על תא מציגה את הטופס ואת ההגדלה
-      של השדה; לחיצה כפולה פותחת עריכה. <b style="color:var(--ok)">ירוק</b> = נבדק על ידי אדם.
-      תא רגיל אינו טענת נכונות — רק שהמנוע לא סימן ספק.<br>
+      <span class="sw review"></span> כתום = המנוע לא בטוח, או שבדיקה אוטומטית נכשלה — תקנו או אשרו ·
+      <span class="sw approved"></span> ירוק = נבדק על ידי אדם · תא רגיל אינו טענת נכונות, רק שלא נמצא ספק.<br>
       דמו להאקתון, מיועד לטפסי הדוגמה. אין כאן טענת דיוק ואין להסתמך על הפלט ללא בדיקה.
     </div>
-  </div>
+  </section>
 </main>
 
-<script>
-const $ = s => document.querySelector(s);
-let FIELDS = [], batch = null, timer = null, last = null;
-let selected = null;  // { rec, key } — key ריק = נבחרה שורה, לא שדה
+<!-- תקריב צף על תא -->
+<div id="pop" class="pop hidden" role="dialog" aria-label="תקריב השדה"></div>
 
-let JUDGES = [];  // הקוראים שהוגדרו. אחד = מצב ברירת המחדל; שניים = השוואה בין שופטים
+<!-- הודעות קופצות -->
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 
-fetch('/api/config').then(r => r.json()).then(c => {
-  FIELDS = c.fields;
-  JUDGES = c.judges || [];
-  const judges = JUDGES.join(' + ');
-  const effort = c.effort ? ' · חשיבה ' + c.effort : '';
-  $('#modelName').textContent = judges + effort;
-  $('#limits').textContent =
-    'PDF, JPG או PNG · עד ' + c.max_files + ' קבצים ו-' + c.max_pages +
-    ' טפסים בגרירה אחת · ' + (JUDGES.length > 1 ? 'שני קוראים: ' : 'קורא: ') + judges + effort;
-  if (JUDGES.length > 1) {
-    $('#pHow').textContent =
-      'כל טופס נקרא על ידי שני קוראים בלתי תלויים. מה שהם לא מסכימים עליו — יסומן לבדיקה.';
-    $('#footHow').innerHTML = 'ערך מוצג רק כששני הקוראים הסכימו עליו. תאים ' +
-      '<b style="color:var(--amber)">כתומים</b> דורשים בדיקה — בחרו אפשרות או תקנו. ' +
-      'ⓘ הערה קטנה בתא רגיל = שני הקוראים הסכימו, אבל יש ספק קטן — מומלץ להציץ.';
-  }
-  // השוואת מודלים רלוונטית רק כשיש שני קוראים.
-  $('#compare').classList.toggle('hidden', JUDGES.length < 2);
-  $('#head').innerHTML =
-    FIELDS.map(f => '<th title="' + esc(f.hint) + '">' + esc(f.label) + '</th>').join('') +
-    '<th>קובץ מקור</th><th>עמוד</th><th>בדיקה</th>';
-  if (!c.has_key) notice('err', 'אין מפתחות API',
-    'לא נמצא מפתח API בקובץ .env (למשל ANTHROPIC_API_KEY). הוסיפו והפעילו מחדש את השרת.');
-});
+<!-- סיור קצר -->
+<div id="tour" class="tour hidden" role="dialog" aria-modal="true" aria-labelledby="tourTitle">
+  <div class="tourbox card">
+    <div class="tourart" id="tourArt" aria-hidden="true"></div>
+    <h2 id="tourTitle"></h2>
+    <p id="tourText"></p>
+    <div class="tourfoot">
+      <span class="tourdots" id="tourDots" aria-hidden="true"></span>
+      <button id="tourSkip">דלג</button>
+      <button class="primary" id="tourNext">הבא</button>
+    </div>
+  </div>
+</div>
 
-function money(usd){
-  if (usd == null) return '—';
-  return usd < 0.01 ? (usd * 100).toFixed(2) + '¢' : '$' + usd.toFixed(3);
-}
+<!-- רגע הצלחה -->
+<div id="party" class="party hidden" aria-hidden="true"></div>
 
-function esc(s){
-  return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
-  });
-}
-
-function notice(kind, title, text){
-  $('#notices').insertAdjacentHTML('beforeend',
-    '<div class="notice ' + kind + '"><b>' + esc(title) + '</b>' + esc(text) + '</div>');
-}
-function clearNotices(){ $('#notices').innerHTML = ''; }
-
-const drop = $('#drop');
-$('#browse').onclick = function(e){ e.stopPropagation(); $('#file').click(); };
-drop.onclick = function(){ $('#file').click(); };
-$('#file').onchange = function(e){ upload(e.target.files); };
-
-['dragenter','dragover'].forEach(function(ev){
-  drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('over'); });
-});
-['dragleave','drop'].forEach(function(ev){
-  drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('over'); });
-});
-drop.addEventListener('drop', function(e){
-  upload(e.dataTransfer.files);
-});
-
-async function upload(fileList){
-  const files = Array.prototype.slice.call(fileList || []);
-  if (!files.length) return;
-
-  clearNotices();
-  drop.classList.add('hidden');
-  $('#results').classList.add('hidden');
-  $('#progress').classList.remove('hidden');
-  $('#pTitle').textContent = files.length === 1
-    ? 'מעלה את הקובץ…'
-    : 'מעלה ' + files.length + ' קבצים…';
-  $('#pCount').textContent = '';
-  $('#pFill').style.width = '4%';
-  $('#pFiles').innerHTML = files.map(function(f){
-    return '<li>' + esc(f.name) + '</li>';
-  }).join('');
-
-  const body = new FormData();
-  files.forEach(function(f){ body.append('files', f); });
-
-  try {
-    const res = await fetch('/api/batches', { method:'POST', body:body });
-    if (!res.ok) {
-      const d = await res.json().catch(function(){ return {}; });
-      throw new Error(d.detail || 'ההעלאה נכשלה');
-    }
-    const info = await res.json();
-    batch = info.batch_id;
-    if (info.rejected)
-      notice('warn', info.rejected + ' קבצים לא התקבלו',
-        'הם מופיעים ברשימה למטה עם הסיבה. שאר הקבצים מעובדים כרגיל.');
-    $('#pTitle').textContent = 'מזהה טפסים…';
-    poll();
-  } catch (err) {
-    fail(err.message);
-  }
-}
-
-function fail(msg){
-  clearInterval(timer);
-  $('#progress').classList.add('hidden');
-  $('#pFiles').innerHTML = '';
-  drop.classList.remove('hidden');
-  notice('err', 'לא הצלחנו לעבד את הקבצים', msg);
-}
-
-function poll(){
-  clearInterval(timer);
-  timer = setInterval(tick, 900);
-  tick();
-}
-
-async function tick(){
-  const res = await fetch('/api/batches/' + batch);
-  if (!res.ok) { clearInterval(timer); return fail('האצווה לא נמצאה'); }
-  const d = await res.json();
-
-  const done = d.processed_pages, total = d.total_pages || 0;
-  $('#pFill').style.width = Math.max(8, total ? (done / total) * 100 : 8) + '%';
-  if (total) {
-    $('#pTitle').textContent = total + ' טפסים זוהו';
-    $('#pCount').textContent = 'מעבד ' + done + ' מתוך ' + total;
-  }
-  $('#pFiles').innerHTML = (d.sources || []).map(function(s){
-    const detail = s.error
-      ? '<span class="bad">' + esc(s.error) + '</span>'
-      : '<span class="good">' + (s.page_count || '…') + ' טפסים</span>';
-    return '<li>' + esc(s.filename) + ' — ' + detail + '</li>';
-  }).join('');
-
-  if (['completed','partial','failed'].indexOf(d.status) !== -1) {
-    clearInterval(timer);
-    $('#progress').classList.add('hidden');
-    if (d.status === 'failed') return fail(d.error || 'העיבוד נכשל');
-    if (d.status === 'partial') notice('warn', 'חלק מהקבצים לא עובדו במלואם', d.error);
-    if (d.skipped_pages)
-      notice('warn', 'נחצתה תקרת הטפסים',
-        d.skipped_pages + ' טפסים לא עובדו. עובדו ' + total +
-        ' הראשונים. ניתן לשנות את MAX_PAGES_PER_BATCH בקובץ .env.');
-    // הבאנר האדום רק כשהוגדרו שני שופטים ואחד מהם לא קרא. קורא אחד במכוון אינו תקלה.
-    const single = JUDGES.length < 2 ? 0 : d.records.filter(function(r){
-      return !r.error && (r.readers || []).length < 2;
-    }).length;
-    if (single)
-      notice('single', 'הבדיקה הכפולה לא פעלה',
-        single + ' מתוך ' + d.records.length + ' טפסים נקראו על ידי מודל אחד בלבד — ' +
-        'אין השוואה בין שני קוראים, ולכן כל השדות שלהם מסומנים לבדיקה. ' +
-        ((d.warnings || [])[0] || ''));
-    (d.warnings || []).forEach(function(w){ notice('warn', 'לתשומת לב', w); });
-    render(d);
-  }
-}
-
-function render(d){
-  last = d;
-  $('#results').classList.remove('hidden');
-  $('#cRecords').textContent = d.records.length;
-  $('#cReview').textContent = d.review_total;
-  $('#cFile').textContent = d.display_name;
-  $('#cCost').textContent = money(d.cost_usd);
-  $('#cTime').textContent = d.seconds ? d.seconds + ' שנ׳' : '—';
-  $('#cSources').textContent = (d.sources || []).filter(function(s){
-    return !s.error;
-  }).length;
-  $('#cReviewChip').classList.toggle('hidden', d.review_total === 0);
-
-  const span = FIELDS.length + 3;
-  $('#body').innerHTML = d.records.map(function(r){
-    const notes = [];
-    if (r.low_resolution)
-      notes.push('רזולוציה נמוכה — כתב יד עלול לא להיקרא. מומלץ להעלות את הסריקה המקורית, לא צילום מסך.');
-    if (r.straightened) notes.push(r.straightened);
-    if (r.error) notes.push('הקריאה נכשלה: ' + r.error);
-    else if (r.note) notes.push('הערה: ' + r.note);
-    const noteRow = notes.length
-      ? '<tr class="noterow"><td colspan="' + span + '">' + esc(notes.join(' · ')) + '</td></tr>'
-      : '';
-    const acts = r.verified
-      ? '<span class="verified">✓ מאומת</span>'
-      : '<button class="verify" data-rec="' + r.record_id + '">שמור כמאומת</button>';
-    return '<tr data-rec="' + r.record_id + '">' +
-      FIELDS.map(function(f){ return cell(r, f); }).join('') +
-      '<td class="page" title="' + esc(r.source_name) + '">' + esc(r.source_name) + '</td>' +
-      '<td class="page">' + r.page_number + '</td>' +
-      '<td class="acts">' + acts + '</td></tr>' + noteRow;
-  }).join('');
-
-  $('#body').querySelectorAll('td.page').forEach(function(td){
-    td.onclick = function(){ showPage(td.parentNode.dataset.rec); };
-  });
-  $('#body').querySelectorAll('td.cell').forEach(function(td){
-    td.onclick = function(){ showField(td.dataset.rec, td.dataset.key); };
-    td.ondblclick = function(e){ e.stopPropagation(); edit(td); };
-  });
-  $('#body').querySelectorAll('.okempty').forEach(function(b){
-    b.onclick = function(e){ e.stopPropagation(); approveEmpty(b.dataset.rec, b.dataset.key); };
-    b.ondblclick = function(e){ e.stopPropagation(); };
-  });
-  $('#body').querySelectorAll('.cand, .addx').forEach(function(b){
-    b.onclick = function(e){
-      e.stopPropagation();
-      choose(b.dataset.rec, b.dataset.key, JSON.parse(b.dataset.values));
-    };
-    b.ondblclick = function(e){ e.stopPropagation(); };
-  });
-  $('#body').querySelectorAll('.verify').forEach(function(b){
-    b.onclick = function(e){ e.stopPropagation(); verify(b.dataset.rec); };
-  });
-
-  if (selected) {
-    if (selected.key) showField(selected.rec, selected.key);
-    else showPage(selected.rec);
-  }
-}
-
-// השוואת מודלים: מה כל שופט קרא בשדה הזה, ועד כמה הצהיר שהוא בטוח.
-const LEGIBILITY_HE = { clear:'ברור', partial:'חלקי', illegible:'לא קריא', absent:'לא קיים' };
-
-function judgeLabel(model){
-  const m = String(model || '');
-  if (m.indexOf('gemini') === 0 || m.indexOf('gemma') === 0) return 'Gemini';
-  if (m.indexOf('gpt') === 0) return 'GPT';
-  if (m.indexOf('claude') === 0) return 'Claude';
-  return m;
-}
-
-function readingsHtml(readings){
-  if (!readings || !readings.length) return '';
-  return '<div class="reads">' + readings.map(function(r){
-    const value = (r.values && r.values.length) ? markUnreadable(r.values.join(' | ')) : '—';
-    const level = LEGIBILITY_HE[r.legibility] || r.legibility || '';
-    return '<div title="' + esc(r.model) + '"><b>' + esc(judgeLabel(r.model)) + ':</b> ' + value +
-      (level ? ' <span class="lv">· ' + esc(level) + '</span>' : '') + '</div>';
-  }).join('') + '</div>';
-}
-
-(function(){
-  let hidden = false;
-  try { hidden = localStorage.getItem('hideReads') === '1'; } catch (e) {}
-  const button = $('#compare');
-  function apply(){
-    document.body.classList.toggle('hide-reads', hidden);
-    button.classList.toggle('on', !hidden);
-  }
-  button.onclick = function(){
-    hidden = !hidden;
-    try { localStorage.setItem('hideReads', hidden ? '1' : '0'); } catch (e) {}
-    apply();
-  };
-  apply();
-})();
-
-function markUnreadable(text){
-  return esc(text).replace(/\?/g, '<mark class="q" title="תו שלא נקרא">?</mark>');
-}
-
-function cell(record, spec){
-  const f = record.fields[spec.key];
-  const cls = f.state === 'needs_review' ? 'review'
-            : f.state === 'approved' ? 'approved' : '';
-  const codes = f.reason_codes || [];
-  const notOnForm = codes.indexOf('not_on_form') !== -1;
-  let text;
-  if (f.values.length) text = markUnreadable(f.values.join(' | '));
-  else if (f.candidates && f.candidates.length) text = '<span class="empty">לא ברור</span>';
-  else if (notOnForm) text = '<span class="empty">לא קיים בטופס</span>';
-  else text = '<span class="empty">לא נמצא</span>';
-
-  const options = (f.candidates || []).map(function(values){
-    return '<button class="cand" title="בחירה בערך הזה" data-rec="' + record.record_id +
-      '" data-key="' + spec.key + '" data-values="' + esc(JSON.stringify(values)) + '">' +
-      markUnreadable(values.join(' | ')) + '</button>';
-  }).join('');
-  const reads = readingsHtml(f.readings);
-  const why = (f.state === 'needs_review' && f.reasons.length)
-    ? '<span class="why">' + esc(f.reasons[0]) + '</span>' : '';
-
-  // הערות רכות: ספק קטן, או ערך שרק מודל אחד מצא. התא נשאר בצבע רגיל.
-  let soft = '';
-  if (f.state !== 'approved') {
-    (f.note_codes || []).forEach(function(code, i){
-      if (code === 'extra_value' && (f.extra_values || []).length) {
-        soft += '<span class="soft">מודל אחד מצא גם ' + markUnreadable(f.extra_values.join(' | ')) +
-          ' — מומלץ לבדוק</span>';
-        f.extra_values.forEach(function(x){
-          soft += '<button class="addx" title="להוסיף את הערך הזה לשדה" data-rec="' + record.record_id +
-            '" data-key="' + spec.key + '" data-values="' +
-            esc(JSON.stringify(f.values.concat([x]))) + '">הוסף גם ' + markUnreadable(x) + '</button> ';
-        });
-      } else {
-        soft += '<span class="soft">' + esc((f.notes || [])[i] || '') + '</span>';
-      }
-    });
-  }
-  // שדה ריק שאין בו מה לבחור: לחיצה אחת מאשרת אותו כריק.
-  const okEmpty = (f.state === 'needs_review' && !f.values.length && !(f.candidates || []).length)
-    ? '<button class="okempty" title="אישור שהשדה באמת ריק בטופס" data-rec="' + record.record_id +
-      '" data-key="' + spec.key + '">אשר כריק</button>' : '';
-
-  return '<td class="cell ' + cls + '" data-key="' + spec.key + '" data-rec="' +
-    record.record_id + '" data-raw="' + esc(f.values.join(' | ')) +
-    '" title="לחיצה: הצגת המקור · לחיצה כפולה: עריכה">' +
-    '<button class="zoom" tabindex="-1" aria-hidden="true">🔍</button>' +
-    text + (options ? '<div class="cands">' + options + '</div>' : '') + why + soft + okEmpty +
-    reads + '</td>';
-}
-
-function recordById(id){
-  return last ? last.records.find(function(r){ return r.record_id === id; }) : null;
-}
-
-function mark(recordId, key){
-  $('#body').querySelectorAll('tr[data-rec]').forEach(function(row){
-    row.classList.toggle('sel', row.dataset.rec === recordId);
-  });
-  $('#body').querySelectorAll('td.cell').forEach(function(td){
-    td.classList.toggle('focus', !!key && td.dataset.rec === recordId && td.dataset.key === key);
-  });
-}
-
-function pageUrl(r){
-  return '/api/batches/' + batch + '/sources/' + r.source_index + '/pages/' + r.page_number;
-}
-
-// סיבוב התצוגה: לכל טופס זווית משלו, כל עוד המסך פתוח. תצוגה בלבד — הקובץ לא משתנה,
-// שום דבר לא נשלח למודל ולא עולה כסף.
-const viewTurn = {};
-
-function turnButton(){
-  return ' <button class="ink-toggle" id="turnBtn" title="לסובב את התצוגה ב-90° — לא משנה את הקובץ">' +
-    '↻ סובב</button>';
-}
-
-document.addEventListener('click', function(e){
-  if (!e.target || e.target.id !== 'turnBtn' || !selected) return;
-  viewTurn[selected.rec] = ((viewTurn[selected.rec] || 0) + 90) % 360;
-  applyTurn();
-});
-
-function applyTurn(){
-  if (!selected) return;
-  const deg = viewTurn[selected.rec] || 0;
-  const page = document.querySelector('#pvFrame .pv-page');
-  if (page) fitTurned(page, page.parentNode, page.querySelector('img'), deg, 0.44);
-  document.querySelectorAll('#pvFrame .pv-cropwrap').forEach(function(wrap){
-    const img = wrap.querySelector('img');
-    if (img) fitTurned(img, wrap, img, deg, 0.30);
-  });
-}
-
-// בסיבוב של 90° הרוחב והגובה מתחלפים: מקטינים כך שייכנס, ומגדילים את המסגרת לגובה החדש.
-function fitTurned(el, wrap, img, deg, heightShare){
-  const odd = deg % 180 !== 0;
-  const tallest = window.innerHeight * heightShare;
-  el.style.transform = deg ? 'rotate(' + deg + 'deg)' : '';
-  img.style.maxHeight = odd ? Math.min(wrap.clientWidth || 380, tallest) + 'px' : '';
-  img.style.maxWidth = odd ? tallest + 'px' : '';
-  const size = function(){ wrap.style.height = odd ? el.offsetWidth + 'px' : ''; };
-  if (img.complete) size(); else img.addEventListener('load', size, { once: true });
-}
-
-// לחיצה על שורה (קובץ/עמוד): הטופס המלא בלבד.
-function showPage(recordId){
-  const r = recordById(recordId);
-  if (!r) return;
-  selected = { rec: recordId, key: null };
-  mark(recordId, null);
-  $('#pvHint').textContent = r.source_name + ' · עמוד ' + r.page_number;
-  $('#pvFrame').innerHTML =
-    '<div class="pv-sec"><div class="pv-lbl">הטופס המלא' + turnButton() + '</div>' +
-    '<div class="pv-pagewrap"><div class="pv-page"><img src="' + pageUrl(r) + '" alt="עמוד ' +
-    r.page_number + '"></div></div></div>';
-  applyTurn();
-}
-
-// "דיו מודגש" בהגדלה: אותה הגדלה בלי מרקרים. הבחירה נזכרת בין טפסים.
-let inkView = false;
-try { inkView = localStorage.getItem('inkView') === '1'; } catch (e) {}
-document.addEventListener('click', function(e){
-  if (!e.target || e.target.id !== 'inkToggle') return;
-  inkView = !inkView;
-  try { localStorage.setItem('inkView', inkView ? '1' : '0'); } catch (err) {}
-  if (selected && selected.key) showField(selected.rec, selected.key);
-});
-
-// לחיצה על תא: החלונית מתפצלת — למעלה הטופס עם ריבוע, למטה ההגדלה של השדה.
-function showField(recordId, key){
-  const r = recordById(recordId);
-  if (!r) return;
-  selected = { rec: recordId, key: key };
-  mark(recordId, key);
-  const spec = FIELDS.find(function(f){ return f.key === key; });
-  const f = r.fields[key];
-  $('#pvHint').textContent = spec.label + ' · ' + r.source_name + ' · עמוד ' + r.page_number;
-
-  // תקריב אחד (המיקום הראשי), או — כשהמודלים קראו דברים שונים מאוד — תקריב לכל מודל.
-  const crops = f.two_crops
-    ? (f.regions || []).map(function(x){ return { model:x.model, box:x.box, by:x.model, ok:x.verified }; })
-    : (f.crop_box ? [{ model:f.crop_by, box:f.crop_box, by:'', ok:f.crop_verified }] : []);
-  const verified = function(c){ return !!c.ok; };
-  const overlay = crops.map(function(c, i){
-    const b = c.box;
-    return '<div class="pv-box' + (i ? ' b2' : '') + '" style="left:' + b[0] * 100 + '%;top:' +
-      b[1] * 100 + '%;width:' + (b[2] - b[0]) * 100 + '%;height:' + (b[3] - b[1]) * 100 + '%"></div>';
-  }).join('');
-  const inkButton = crops.length
-    ? ' <button class="ink-toggle' + (inkView ? ' on' : '') + '" id="inkToggle" ' +
-      'title="להציג את ההגדלה בלי מרקרים, עם כתב היד בשחור">דיו מודגש</button>' : '';
-  const zoomed = crops.length
-    ? crops.map(function(c, i){
-        const query = [];
-        if (c.by) query.push('by=' + encodeURIComponent(c.by));
-        if (inkView) query.push('ink=1');
-        const who = crops.length > 1 || !verified(c)
-          ? ' <span class="src' + (i ? ' b2' : '') + '"></span>לפי ' + esc(judgeLabel(c.model)) +
-            (verified(c) ? '' : ' <span class="unv">(מיקום לא אומת)</span>')
-          : '';
-        return '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל' +
-          who + (i === 0 ? inkButton : '') + '</div>' +
-          '<div class="pv-cropwrap"><img src="' + pageUrl(r) + '/crops/' + key +
-          (query.length ? '?' + query.join('&') : '') + '" alt="' + esc(spec.label) + ' מוגדל"></div></div>';
-      }).join('')
-    : '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(spec.label) + ' — מוגדל</div>' +
-      '<div class="pv-missing">אין מיקום לשדה הזה בעמוד — הוצג הטופס המלא בלבד, בלי תקריב מומצא.</div></div>';
-
-  $('#pvFrame').innerHTML =
-    '<div class="pv-sec"><div class="pv-lbl">הטופס המלא' + turnButton() + '</div>' +
-    '<div class="pv-pagewrap"><div class="pv-page"><img src="' + pageUrl(r) + '" alt="עמוד ' +
-    r.page_number + '">' + overlay + '</div></div></div>' + zoomed;
-  applyTurn();
-}
-
-async function choose(recordId, key, values){
-  const res = await fetch('/api/records/' + recordId, {
-    method:'PATCH',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ field:key, values:values })
-  });
-  if (res.ok) render(await res.json());
-}
-
-async function approveEmpty(recordId, key){
-  const res = await fetch('/api/records/' + recordId, {
-    method:'PATCH',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ field:key, approve:true })
-  });
-  if (res.ok) render(await res.json());
-}
-
-async function verify(recordId){
-  const res = await fetch('/api/records/' + recordId + '/verify', { method:'POST' });
-  if (res.ok) return render(await res.json());
-  const d = await res.json().catch(function(){ return {}; });
-  notice('warn', 'עוד לא אפשר לשמור כמאומת', d.detail || 'נסו שוב.');
-}
-
-function edit(td){
-  if (td.querySelector('input')) return;
-  const key = td.dataset.key, rec = td.dataset.rec;
-  td.innerHTML = '';
-  const input = document.createElement('input');
-  input.value = td.dataset.raw || '';
-  td.appendChild(input);
-  input.focus();
-  input.select();
-
-  let closed = false;
-  const commit = async function(){
-    if (closed) return;
-    closed = true;
-    const values = input.value.split('|').map(function(s){ return s.trim(); })
-                                         .filter(Boolean);
-    const res = await fetch('/api/records/' + rec, {
-      method:'PATCH',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ field:key, values:values })
-    });
-    if (res.ok) render(await res.json());
-  };
-  input.onblur = commit;
-  input.onkeydown = function(e){
-    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-    if (e.key === 'Escape') { closed = true; tick(); }
-  };
-}
-
-$('#download').onclick = async function(){
-  const res = await fetch('/api/batches/' + batch + '/export', { method:'POST' });
-  if (!res.ok) return notice('err', 'הייצוא נכשל', 'נסו שוב.');
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'commitments-' + batch + '.xlsx';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-};
-
-$('#again').onclick = function(){
-  batch = null;
-  selected = null;
-  clearNotices();
-  $('#results').classList.add('hidden');
-  $('#file').value = '';
-  drop.classList.remove('hidden');
-};
-</script>
+<script src="/static/app.js?v={{v}}"></script>
 </body>
 </html>

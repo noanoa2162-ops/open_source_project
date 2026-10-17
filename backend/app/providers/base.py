@@ -1,7 +1,7 @@
 """The contract every extraction backend must satisfy.
 
-Business code depends on this, never on a vendor SDK, so swapping a judge for
-an internal model later is a change in one adapter and one config line.
+Business code depends on this, never on a vendor SDK, so swapping the reader
+for an internal model later is a change in one adapter and one config line.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 
 # כמה בטוח הקורא שקרא נכון. זו הצהרה של המודל, לא הסתברות מכוילת —
-# משמשת רק כסיבה נוספת לסמן כתום, לעולם לא כסיבה לסמן "נכון".
+# משמשת רק כסיבה לסמן כתום, לעולם לא כסיבה לסמן "נכון".
 LEGIBILITY_CLEAR = "clear"
 LEGIBILITY_PARTIAL = "partial"
 LEGIBILITY_ILLEGIBLE = "illegible"
@@ -36,7 +36,7 @@ class Usage:
 
 @dataclass
 class RawExtraction:
-    """What one judge returns for one page, before comparison and validation."""
+    """What the reader returns for one page, before validation."""
 
     values: dict[str, list[str]] = field(default_factory=dict)
     note: str = ""
@@ -47,12 +47,6 @@ class RawExtraction:
     context: dict[str, str] = field(default_factory=dict)
     template: str = ""
     usage: Usage | None = None
-    # האם אפשר לסמוך על המיקומים להגדלה. GPT מחזיר תיבות, אבל בבדיקות החיות הן
-    # נחתו במקום הלא נכון — ולכן ההגדלה לוקחת מיקום רק משופט שזה True אצלו.
-    regions_reliable: bool = True
-    # מיקומים שלא אומתו, אבל מותר להציג כגיבוי כשאין מיקום אמין — עם תווית "לא אומת".
-    # Claude: כן. GPT: לא — בבדיקות החיות התיבות שלו נחתו במקום אחר לגמרי.
-    regions_fallback: bool = False
     upside_down: bool = False  # השופט דיווח שהדף בתמונה הפוך (180°)
 
 
