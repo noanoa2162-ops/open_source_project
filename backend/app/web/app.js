@@ -10,9 +10,9 @@ const $$ = s => Array.prototype.slice.call(document.querySelectorAll(s));
 
 let CONFIG = null, FIELDS = [];
 let batch = null, timer = null, last = null, processing = false;
-let selected = null;            // { rec, key } בחלונית המקור (מצב טבלה)
-let view = load('view', 'table');
-let filter = 'all', senderFilter = '';
+let view = load('view', 'tiles') === 'table' ? 'table' : 'tiles';   // tiles | table | form (טופס פתוח מתוך האריחים)
+let finishing = false;
+let filter = 'all', senderFilter = '', query = '';
 let formIndex = 0, cardIndex = 0;
 let lastSignature = '';
 let celebrated = false;
@@ -45,17 +45,48 @@ $('#sizeDown').onclick = function(){ setSize(-1); };
 fetch('/api/config').then(function(r){ return r.json(); }).then(function(c){
   CONFIG = c;
   FIELDS = c.fields;
+  applyBrand(c.brand);
   const reader = c.model + (c.effort ? ' · חשיבה ' + c.effort : '');
   $('#modelName').textContent = reader;
   $('#limits').textContent = 'PDF, JPG או PNG · עד ' + c.max_files + ' קבצים ו-' + c.max_pages +
     ' טפסים בגרירה אחת · קורא: ' + reader;
-  $('#head').innerHTML = FIELDS.map(function(f){
+  $('#head').innerHTML = '<th scope="col">טופס</th>' + FIELDS.map(function(f){
     return '<th scope="col" title="' + esc(f.hint) + '">' + esc(f.label) + '</th>';
-  }).join('') + '<th scope="col">קובץ מקור</th><th scope="col">עמוד</th><th scope="col">אישור</th>';
+  }).join('') + '<th scope="col">אישור</th>';
   $('#sampleBtn').classList.toggle('hidden', !c.sample);
   if (!c.has_key) notice('err', 'אין מפתח API', 'לא נמצא ANTHROPIC_API_KEY בקובץ .env. הוסיפו והפעילו מחדש את השרת.');
   if (load('toured', '') !== '1') openTour();
 });
+
+/* ------------------------------------------------------------ מיתוג */
+// moh = עיצוב משרד הבריאות (ברירת המחדל); neutral = הסמל והשם שלנו, בלי שם המשרד ובלי הלוגו.
+const NEUTRAL_MARK = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect x="9" y="5" width="22" height="30" rx="3" fill="#fff" stroke="#186cb4" stroke-width="2.5"/>' +
+  '<path d="M14 13h12M14 18h9" stroke="#9db4c8" stroke-width="2.5" stroke-linecap="round"/>' +
+  '<path d="M14 26l4 4 8-9" fill="none" stroke="#00a8cc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+function applyBrand(brand){
+  root.dataset.brand = brand === 'neutral' ? 'neutral' : 'moh';
+  if (root.dataset.brand !== 'neutral') return;
+  $('#brand .mark img').src = NEUTRAL_MARK;
+  $('#brandOrg').textContent = 'טופס למידע';
+  $('#brandUnit').textContent = 'קליטת טפסי התחייבות';
+  $('#footMark').classList.add('hidden');
+  $('#footOrg').textContent = 'טופס למידע';
+  $('#footUnit').textContent = 'קליטת טפסי התחייבות';
+  const icon = document.querySelector('link[rel="icon"]');
+  if (icon) icon.href = NEUTRAL_MARK;
+  document.title = 'קליטת טפסי התחייבות — טופס למידע';
+}
+
+// שלבי העבודה בראש העמוד: 1 העלאה → 2 בדיקה ואישור → 3 ייצוא
+function setStep(n){
+  $$('#steps li').forEach(function(li){
+    const step = Number(li.dataset.step);
+    li.classList.toggle('now', step === n);
+    li.classList.toggle('done', step < n);
+    if (step === n) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current');
+  });
+}
 
 /* ------------------------------------------------------------ כלים קטנים */
 function esc(s){
@@ -82,6 +113,14 @@ function valueHtml(f){
   return '<span class="empty">' + (notOnForm ? 'לא קיים בטופס' : 'לא נמצא') + '</span>';
 }
 function editing(){ return !!document.querySelector('td input, .cardEdit input'); }
+function firstValue(r, key){ return (r.fields[key] && r.fields[key].values[0]) || ''; }
+// תג מצב בצורת "שירות מקוון" של gov.il. ירוק רק כשאדם אישר.
+function statusBadge(r){
+  if (r.error) return '<span class="badge fail">✗ הקריאה נכשלה</span>';
+  if (isApproved(r)) return '<span class="badge ok">✓ ' + (r.verified ? 'מאומת' : 'מאושר') + '</span>';
+  if (r.review_count) return '<span class="badge review">⚠ <b>' + r.review_count + '</b> לבדיקה</span>';
+  return '<span class="badge ready">מוכן לאישור</span>';
+}
 
 /* ------------------------------------------------------------ הודעות */
 function notice(kind, title, text){
@@ -103,6 +142,11 @@ function toast(text, opts){
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
+  const all = $$('#toasts .toast:not(.out)');
+  all.slice(0, Math.max(0, all.length - 3)).forEach(function(old){
+    old.classList.add('out');
+    setTimeout(function(){ old.remove(); }, 260);
+  });
   const t = setTimeout(dismiss, opts.ms || (opts.undo ? 6500 : 3500));
   function dismiss(){
     clearTimeout(t);
@@ -127,15 +171,16 @@ drop.addEventListener('drop', function(e){ upload(e.dataTransfer.files); });
 
 function showProgress(title, names){
   clearNotices();
+  setStep(2);
   drop.classList.add('hidden');
   $('#results').classList.add('hidden');
   $('#progress').classList.remove('hidden');
   $('#pTitle').textContent = title;
   $('#pCount').textContent = '';
-  $('#pFill').style.width = '4%';
+  resetRing();
   $('#tiles').innerHTML = '';
   Object.keys(tilesBuilt).forEach(function(k){ delete tilesBuilt[k]; });
-  $('#pFiles').innerHTML = (names || []).map(function(n){ return '<li>' + esc(n) + '</li>'; }).join('');
+  $('#pFiles').innerHTML = (names || []).map(function(n){ return '<li><bdi>' + esc(n) + '</bdi></li>'; }).join('');
 }
 
 async function upload(fileList){
@@ -171,7 +216,8 @@ async function startSample(){
 function begin(info){
   batch = info.batch_id;
   last = null;
-  selected = null;
+  finishing = false;
+  view = 'tiles';
   lastSignature = '';
   celebrated = false;
   formIndex = 0;
@@ -191,77 +237,120 @@ function fail(msg){
   $('#progress').classList.add('hidden');
   $('#pFiles').innerHTML = '';
   drop.classList.remove('hidden');
+  setStep(1);
   notice('err', 'לא הצלחנו לעבד את הקבצים', msg);
 }
 
 /* ------------------------------------------------------------ התקדמות חיה */
+// גלגל שמתמלא לפי הטפסים המוכנים, ומספר שסופר אליהם בהדרגה.
+const RING_C = 2 * Math.PI * 52;
+const calm = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+let ringShown = 0, ringTarget = 0, ringTimer = null;
+
+function resetRing(){
+  clearTimeout(ringTimer);
+  ringTimer = null;
+  ringShown = ringTarget = 0;
+  $('#ring').className = 'ring indeterminate';
+  $('#ringArc').style.strokeDashoffset = '';
+  $('#ringNum').textContent = '0';
+  $('#ringOf').textContent = 'מכין…';
+}
+
+function setRing(done, total){
+  if (!total) return;
+  $('#ring').classList.remove('indeterminate');
+  $('#ringArc').style.strokeDashoffset = String(RING_C * (1 - Math.min(1, done / total)));
+  $('#ringOf').textContent = 'מתוך ' + total + (total === 1 ? ' טופס' : ' טפסים');
+  countTo(done);
+}
+
+function countTo(n){
+  ringTarget = n;
+  if (calm) { ringShown = n; $('#ringNum').textContent = n; return; }
+  if (ringTimer) return;
+  (function step(){
+    if (ringShown === ringTarget) { ringTimer = null; return; }
+    ringShown += ringShown < ringTarget ? 1 : -1;
+    $('#ringNum').textContent = ringShown;
+    ringTimer = setTimeout(step, Math.max(45, 450 / Math.max(1, Math.abs(ringTarget - ringShown))));
+  })();
+}
+
 async function tick(){
-  const res = await fetch('/api/batches/' + batch);
+  const me = batch;
+  const res = await fetch('/api/batches/' + me);
+  if (me !== batch || finishing) return;
   if (!res.ok) { clearInterval(timer); return fail('האצווה לא נמצאה'); }
   const d = await res.json();
-  const total = d.total_pages || 0, done = d.processed_pages;
+  if (me !== batch || finishing) return;
+  const total = d.total_pages || 0, done = d.processed_pages || 0;
   const finished = ['completed', 'partial', 'failed'].indexOf(d.status) !== -1;
+  const reading = (d.pages || []).filter(function(p){ return p.status === 'reading'; }).length;
 
-  $('#pFill').style.width = Math.max(6, total ? (done / total) * 100 : 6) + '%';
+  setRing(done, total);
   if (total) {
-    const reading = (d.pages || []).filter(function(p){ return p.status === 'reading'; }).length;
-    $('#pTitle').textContent = 'קורא ' + total + ' טפסים';
-    $('#pCount').textContent = done + ' מוכנים · ' + reading + ' נקראים עכשיו · ' +
-      Math.max(0, total - done - reading) + ' בתור';
+    $('#pTitle').textContent = 'קורא את הטפסים';
+    $('#pCount').textContent = 'נקראים עכשיו: ' + reading + ' · בתור: ' + Math.max(0, total - done - reading);
   }
   $('#pFiles').innerHTML = (d.sources || []).map(function(s){
-    const detail = s.error ? '<span class="bad">' + esc(s.error) + '</span>'
-                           : '<span class="good">' + (s.page_count || '…') + ' טפסים</span>';
-    return '<li>' + esc(s.filename) + ' — ' + detail + '</li>';
+    const count = s.page_count === 1 ? 'טופס אחד' : (s.page_count || '…') + ' טפסים';
+    const detail = s.error ? '<span class="bad">' + esc(s.error) + '</span>' : '<span class="good">' + count + '</span>';
+    return '<li><bdi>' + esc(s.filename) + '</bdi> — ' + detail + '</li>';
   }).join('');
   updateTiles(d);
+  if (!finished) return;
 
-  if (d.records.length) render(d);
-
-  if (finished) {
-    clearInterval(timer);
+  // הכול נקרא: הגלגל מתמלא, ✓, ואז עוברים לאריחים. עד עכשיו אין מה ללחוץ.
+  clearInterval(timer);
+  finishing = true;
+  if (d.status === 'failed') { finishing = false; return fail(d.error || 'העיבוד נכשל'); }
+  const n = d.records.length;
+  setRing(total || n, total || n);
+  $('#ring').classList.add('complete');
+  $('#pTitle').textContent = n === 1 ? 'הטופס נקלט' : 'כל ' + n + ' הטפסים נקלטו';
+  $('#pCount').textContent = 'עוברים לבדיקה ולאישור';
+  setTimeout(function(){
+    if (me !== batch) return;
+    finishing = false;
     processing = false;
     $('#progress').classList.add('hidden');
-    if (d.status === 'failed') return fail(d.error || 'העיבוד נכשל');
     if (d.status === 'partial') notice('warn', 'חלק מהקבצים לא עובדו במלואם', d.error);
     if (d.skipped_pages)
       notice('warn', 'נחצתה תקרת הטפסים', d.skipped_pages + ' טפסים לא עובדו. עובדו ' + total +
         ' הראשונים. ניתן לשנות את MAX_PAGES_PER_BATCH בקובץ .env.');
     (d.warnings || []).forEach(function(w){ notice('warn', 'לתשומת לב', w); });
-    render(d, !editing());
-  }
+    lastSignature = '';
+    render(d, true);
+    $('#results').scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' });
+  }, calm ? 250 : 1300);
 }
 
+// אריחי הרקע של מסך הטעינה: שלד מהבהב בתור, והטופס עולה כשהוא נקרא. לא לחיצים.
 function updateTiles(d){
   const box = $('#tiles');
-  (d.pages || []).forEach(function(p, i){
+  (d.pages || []).forEach(function(p){
     const id = p.source_index + '-' + p.page_number;
     let tile = tilesBuilt[id];
     if (!tile) {
-      tile = document.createElement('button');
+      tile = document.createElement('div');
       tile.className = 'tile queued';
-      tile.type = 'button';
-      tile.innerHTML = '<img alt="" loading="lazy" src="/api/batches/' + batch + '/sources/' + p.source_index +
-        '/pages/' + p.page_number + '/thumb"><span class="num">' + (i + 1) + '</span><span class="tag">בתור</span>';
+      tile.innerHTML = '<img alt="" data-src="/api/batches/' + batch + '/sources/' + p.source_index +
+        '/pages/' + p.page_number + '/thumb"><i class="dot"></i>';
       tile.querySelector('img').onerror = function(){ this.style.visibility = 'hidden'; };
-      tile.onclick = function(){ if (tile.dataset.rec) openRecord(tile.dataset.rec); };
       box.appendChild(tile);
       tilesBuilt[id] = tile;
     }
     const record = p.record_id ? d.records.find(function(r){ return r.record_id === p.record_id; }) : null;
-    let cls = p.status, tag = 'בתור';
-    if (p.status === 'reading') tag = 'נקרא…';
-    if (p.status === 'skipped') tag = 'לא עובד';
-    if (p.status === 'failed') tag = '✗ נכשל';
-    if (p.status === 'done' && record) {
-      cls = record.review_count ? 'review' : 'done';
-      tag = record.review_count ? '⚠ ' + record.review_count + ' לבדיקה' : '✓ מוכן';
-    }
-    if (!tile.classList.contains(cls)) tile.className = 'tile ' + cls;
-    tile.querySelector('.tag').textContent = tag;
-    tile.dataset.rec = record ? record.record_id : '';
-    tile.disabled = !record;
-    tile.setAttribute('aria-label', 'טופס ' + (i + 1) + ': ' + tag + (record ? ' — לחיצה פותחת אותו' : ''));
+    let cls = p.status === 'reading' ? 'reading' : 'queued';
+    if (p.status === 'done') cls = 'shown ' + (record && record.review_count ? 'review' : 'done');
+    if (p.status === 'failed') cls = 'shown failed';
+    if (p.status === 'skipped') cls = 'shown';
+    if (tile.dataset.cls === cls) return;
+    tile.dataset.cls = cls;
+    tile.className = 'tile ' + cls;
+    const img = tile.querySelector('img');
+    if (cls.indexOf('shown') === 0 && !img.getAttribute('src')) img.src = img.dataset.src;
   });
 }
 
@@ -272,6 +361,10 @@ function visibleRecords(){
     if (filter === 'review' && !(r.review_count > 0)) return false;
     if (filter === 'approved' && !isApproved(r)) return false;
     if (senderFilter && senderOf(r) !== senderFilter) return false;
+    if (query) {
+      const text = FIELDS.map(function(f){ return r.fields[f.key].values.join(' '); }).join(' ') + ' ' + r.source_name;
+      if (text.toLowerCase().indexOf(query) === -1) return false;
+    }
     return true;
   });
 }
@@ -288,7 +381,8 @@ function render(d, force){
   last = d;
   $('#results').classList.remove('hidden');
   updateChips(d);
-  const sig = signature(d) + '|' + filter + '|' + senderFilter + '|' + view;
+  setStep(!processing && d.records.length && d.review_total === 0 ? 3 : 2);
+  const sig = signature(d) + '|' + filter + '|' + senderFilter + '|' + query + '|' + view;
   // רענון אוטומטי (בזמן הקריאה) לא מוחק את מה שהמזכירה מקלידה.
   // אחרי פעולה שלה (force) — תמיד מציירים מחדש.
   if (!force && (sig === lastSignature || editing())) return;
@@ -308,6 +402,19 @@ function updateChips(d){
   $('#nAll').textContent = d.records.length;
   $('#nReview').textContent = d.records.filter(function(r){ return r.review_count > 0; }).length;
   $('#nApproved').textContent = d.records.filter(isApproved).length;
+  const reviewForms = d.records.filter(function(r){ return r.review_count > 0; }).length;
+  $('#navReviewN').textContent = reviewForms || '';
+  $('#navReview').disabled = !d.records.length;
+  // ייצוא רק אחרי שכל שדה כתום תוקן או אושר (השרת אוכף את אותו כלל)
+  const ready = !processing && d.records.length > 0 && d.review_total === 0;
+  const why = !d.records.length ? 'אין טפסים לייצוא' : processing ? 'הייצוא ייפתח בסוף הקריאה'
+    : d.review_total ? 'נשארו ' + d.review_total + ' שדות לבדיקה לפני ייצוא' : '';
+  $('#download').disabled = !ready;
+  $('#navExport').disabled = !ready;
+  $('#exportHint').textContent = why;
+  $('#download').title = why || 'הורדת כל הטפסים לקובץ Excel';
+  $('#navExport').title = why || 'הורדת כל הטפסים לקובץ Excel';
+  if (!ready) $('#download').classList.remove('ready');
   const senders = Array.from(new Set(d.records.map(senderOf).filter(Boolean))).sort();
   const sel = $('#senderFilter');
   const options = '<option value="">כל הגורמים</option>' + senders.map(function(s){
@@ -317,16 +424,59 @@ function updateChips(d){
 }
 
 function showView(){
+  if (['table', 'tiles', 'form'].indexOf(view) === -1) view = 'tiles';
+  $('#viewTiles').setAttribute('aria-selected', String(view !== 'table'));
   $('#viewTable').setAttribute('aria-selected', String(view === 'table'));
-  $('#viewForm').setAttribute('aria-selected', String(view === 'form'));
-  $('#tableView').classList.toggle('hidden', view !== 'table');
-  $('#formView').classList.toggle('hidden', view !== 'form');
+  ['table', 'tiles', 'form'].forEach(function(v){
+    $('#' + v + 'View').classList.toggle('hidden', view !== v);
+  });
   closePop();
-  if (view === 'table') renderTable(); else renderForm();
+  if (view === 'table') renderTable(); else if (view === 'tiles') renderTiles(); else renderForm();
 }
 
-$('#viewTable').onclick = function(){ view = 'table'; save('view', view); lastSignature = ''; if (last) render(last, true); };
-$('#viewForm').onclick = function(){ view = 'form'; save('view', view); lastSignature = ''; if (last) render(last, true); };
+function setView(v){ view = v; save('view', view); lastSignature = ''; if (last) render(last, true); }
+$('#viewTable').onclick = function(){ setView('table'); };
+$('#viewTiles').onclick = function(){ setView('tiles'); };
+
+// חיפוש: התיבה בפס העליון והתיבה בפאנל הסינון מסונכרנות
+let queryTimer = null;
+['#q', '#q2'].forEach(function(sel, i, all){
+  $(sel).addEventListener('input', function(e){
+    const other = $(all[1 - i]);
+    if (other.value !== e.target.value) other.value = e.target.value;
+    clearTimeout(queryTimer);
+    queryTimer = setTimeout(function(){
+      query = e.target.value.trim().toLowerCase();
+      formIndex = 0;
+      if (last) render(last, true);
+    }, 180);
+  });
+});
+$('#q').addEventListener('keydown', function(e){
+  if (e.key === 'Enter' && last) $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+// תפריט הגלולות בכותרת המשנה
+$('#navUpload').onclick = function(){ window.scrollTo({ top: 0, behavior: 'smooth' }); };
+$('#navReview').onclick = function(){
+  const b = document.querySelector('.filters button[data-filter="review"]');
+  if (b) b.click();
+  $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+$('#navExport').onclick = function(){ $('#download').click(); };
+
+// כפתור עגול "חזרה לראש הדף", כמו באתר
+// מוסתר כשפס הקודם/הבא על המסך, כדי לא לכסות את "הטופס הבא"
+let navInView = false;
+function updateTopButton(){ $('#backToTop').classList.toggle('show', window.scrollY > 500 && !navInView); }
+window.addEventListener('scroll', updateTopButton, { passive: true });
+if ('IntersectionObserver' in window) {
+  new IntersectionObserver(function(entries){
+    navInView = entries.some(function(e){ return e.isIntersecting; });
+    updateTopButton();
+  }).observe($('#formView .formnav'));
+}
+$('#backToTop').onclick = function(){ window.scrollTo({ top: 0, behavior: 'smooth' }); };
 $$('.filters button').forEach(function(b){
   b.onclick = function(){
     filter = b.dataset.filter;
@@ -342,7 +492,7 @@ let focusedCell = null;
 
 function renderTable(){
   const rows = visibleRecords();
-  const span = FIELDS.length + 3;
+  const span = FIELDS.length + 2;
   $('#emptyFilter').classList.toggle('hidden', rows.length > 0);
   $('#body').innerHTML = rows.map(function(r){
     const notes = [];
@@ -355,14 +505,14 @@ function renderTable(){
     const acts = r.verified
       ? '<span class="verified">✓ מאומת</span>'
       : '<button class="approveRow" data-rec="' + r.record_id + '"' + (open ? ' disabled' : '') +
-        ' title="' + (open ? 'קודם צריך לבדוק ' + open + ' שדות כתומים' : 'אישור כל הטופס ושמירה כמאומת') + '">✓ אשר טופס</button>';
-    return '<tr data-rec="' + r.record_id + '">' + FIELDS.map(function(f){ return cell(r, f); }).join('') +
-      '<td class="page" title="' + esc(r.source_name) + '">' + esc(r.source_name) + '</td>' +
-      '<td class="page">' + r.page_number + '</td><td class="acts">' + acts + '</td></tr>' + noteRow;
+        ' title="' + (open ? 'קודם צריך לבדוק ' + open + ' שדות כתומים' : 'אישור כל הטופס ושמירה כמאומת') + '">✓ אשר</button>';
+    const num = last.records.indexOf(r) + 1;
+    return '<tr data-rec="' + r.record_id + '"><td class="formcol" title="פתיחת הטופס · ' + esc(r.source_name) +
+      ' · עמוד ' + r.page_number + '"><div class="fc"><img loading="lazy" alt="" src="' + pageUrl(r) + '/thumb">' +
+      '<span class="t"><b>טופס ' + num + '</b>' + statusBadge(r) + '</span></div></td>' +
+      FIELDS.map(function(f){ return cell(r, f); }).join('') +
+      '<td class="acts">' + acts + '</td></tr>' + noteRow;
   }).join('');
-  if (selected) {
-    if (selected.key) showField(selected.rec, selected.key); else showPage(selected.rec);
-  }
   if (focusedCell) {
     const td = document.querySelector('td.cell[data-rec="' + focusedCell.rec + '"][data-key="' + focusedCell.key + '"]');
     if (td) td.focus({ preventScroll: true });
@@ -393,8 +543,8 @@ tbody.addEventListener('click', function(e){
   if (btn && btn.classList.contains('approveRow')) { e.stopPropagation(); return verify(btn.dataset.rec); }
   if (btn && btn.dataset.act === 'approve') { e.stopPropagation(); return approveField(rec, td.dataset.key); }
   if (btn && btn.dataset.act === 'edit') { e.stopPropagation(); return edit(td); }
-  if (td.classList.contains('cell')) showField(rec, td.dataset.key);
-  else if (td.classList.contains('page')) showPage(rec);
+  if (td.classList.contains('cell')) { clearTimeout(popTimer); openPop(td); }
+  else if (td.classList.contains('formcol') && rec) openRecord(rec);
 });
 tbody.addEventListener('dblclick', function(e){
   const td = e.target.closest('td.cell');
@@ -403,7 +553,7 @@ tbody.addEventListener('dblclick', function(e){
 tbody.addEventListener('keydown', function(e){
   const td = e.target.closest && e.target.closest('td.cell');
   if (!td || e.target.tagName === 'INPUT') return;
-  if (e.key === 'Enter') { e.preventDefault(); showField(td.dataset.rec, td.dataset.key); }
+  if (e.key === 'Enter') { e.preventDefault(); openPop(td); }
   else if (e.key === 'F2' || e.code === 'KeyE') { e.preventDefault(); edit(td); }
   else if (e.code === 'KeyA') { e.preventDefault(); approveField(td.dataset.rec, td.dataset.key); }
 });
@@ -428,6 +578,35 @@ tbody.addEventListener('mouseout', function(e){
   if (td && !td.contains(e.relatedTarget)) scheduleClose();
 });
 
+/* ------------------------------------------------------------ מצב אריחים */
+// אריח לכל טופס, כמו אריחי השירותים באתר: תמונה, תג מצב, גורם שולח, שם ומספרים.
+function renderTiles(){
+  const list = visibleRecords();
+  $('#tilesEmpty').classList.toggle('hidden', list.length > 0);
+  $('#tileGrid').innerHTML = list.map(function(r){
+    const name = [firstValue(r, 'first_name'), firstValue(r, 'last_name')].filter(Boolean).join(' ');
+    const commit = r.fields.commitment_numbers ? r.fields.commitment_numbers.values.join(', ') : '';
+    const sender = senderOf(r);
+    return '<li class="ftile" tabindex="0" role="button" data-rec="' + r.record_id + '" aria-label="' +
+      esc((sender || 'גורם לא זוהה') + ', ' + (name || 'שם לא זוהה') + '. פתיחת הטופס') + '">' +
+      '<div class="thumb"><img loading="lazy" alt="" src="' + pageUrl(r) + '/thumb">' + statusBadge(r) + '</div>' +
+      '<div class="body"><h4>' + esc(sender || 'גורם שולח לא זוהה') + '</h4>' +
+      '<span class="who">' + esc(name || '—') + '</span>' +
+      '<span class="nums">מספר התחייבות: <b>' + esc(commit || '—') + '</b></span>' +
+      '<span class="metaline"><span>עמוד ' + r.page_number + '</span><span class="file" title="' + esc(r.source_name) + '">' +
+      esc(r.source_name) + '</span></span></div></li>';
+  }).join('');
+  $$('#tileGrid img').forEach(function(img){ img.onerror = function(){ this.style.visibility = 'hidden'; }; });
+}
+$('#tileGrid').addEventListener('click', function(e){
+  const t = e.target.closest('.ftile');
+  if (t) openRecord(t.dataset.rec);
+});
+$('#tileGrid').addEventListener('keydown', function(e){
+  const t = e.target.closest('.ftile');
+  if (t && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openRecord(t.dataset.rec); }
+});
+
 /* ------------------------------------------------------------ תקריב צף */
 let popTimer = null, popFor = null;
 const pop = $('#pop');
@@ -439,6 +618,7 @@ pop.addEventListener('click', function(e){
   const td = popFor;
   if (b.dataset.act === 'approve') approveField(td.dataset.rec, td.dataset.key);
   if (b.dataset.act === 'edit') { closePop(); edit(td); }
+  if (b.dataset.act === 'open') { closePop(); openRecord(td.dataset.rec); }
 });
 
 function schedulePop(td, delay){
@@ -465,10 +645,10 @@ function openPop(td){
   pop.innerHTML =
     '<div class="lbl"><span>' + esc(fieldLabel(key)) + '</span><span>' + state + '</span></div>' +
     (f.crop_box ? '<div class="crop"><img alt="תקריב של ' + esc(fieldLabel(key)) + '" src="' + cropUrl(r, key) + '"></div>'
-                : '<div class="crop"><div class="nocrop">אין מיקום לשדה הזה — לחיצה על התא מציגה את הטופס המלא</div></div>') +
+                : '<div class="crop"><div class="nocrop">אין מיקום לשדה הזה — אפשר לפתוח את הטופס המלא</div></div>') +
     '<div class="val">' + valueHtml(f) + '</div>' +
     (f.state === 'needs_review' && f.reasons.length ? '<div class="why">' + esc(f.reasons.join(' · ')) + '</div>' : '') +
-    '<div class="btns">' +
+    '<div class="btns"><button class="secondary" data-act="open">פתיחת הטופס</button>' +
     (f.state !== 'approved' ? '<button class="primary" data-act="approve">✓ ' + (f.values.length ? 'אשר' : 'אשר כריק') + '</button>' : '') +
     '<button data-act="edit">✎ תקן</button></div>';
   pop.classList.remove('hidden');
@@ -509,53 +689,21 @@ function pageHtml(r, f, withInk){
     ' של ' + esc(r.source_name) + '">' + boxHtml(f) + '</div></div></div>';
 }
 
-function showPage(recordId){
-  const r = recordById(recordId);
-  if (!r) return;
-  selected = { rec: recordId, key: null };
-  mark(recordId, null);
-  $('#pvHint').textContent = r.source_name + ' · עמוד ' + r.page_number;
-  $('#pvFrame').innerHTML = pageHtml(r, null, false);
-  applyTurn($('#pvFrame'), recordId);
-}
-
-function showField(recordId, key){
-  const r = recordById(recordId);
-  if (!r) return;
-  selected = { rec: recordId, key: key };
-  mark(recordId, key);
-  const f = r.fields[key];
-  $('#pvHint').textContent = fieldLabel(key) + ' · ' + r.source_name + ' · עמוד ' + r.page_number;
-  const zoomed = f.crop_box
-    ? '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(fieldLabel(key)) + ' — מוגדל</div>' +
-      '<div class="pv-cropwrap"><img src="' + cropUrl(r, key) + '" alt="' + esc(fieldLabel(key)) + ' מוגדל"></div></div>'
-    : '<div class="pv-sec pv-crop"><div class="pv-lbl">' + esc(fieldLabel(key)) + ' — מוגדל</div>' +
-      '<div class="pv-missing">אין מיקום לשדה הזה בעמוד — הוצג הטופס המלא בלבד, בלי תקריב מומצא.</div></div>';
-  $('#pvFrame').innerHTML = pageHtml(r, f, !!f.crop_box) + zoomed;
-  applyTurn($('#pvFrame'), recordId);
-}
-
-function mark(recordId, key){
-  $$('#body tr[data-rec]').forEach(function(row){ row.classList.toggle('sel', row.dataset.rec === recordId); });
-  $$('#body td.cell').forEach(function(td){
-    td.classList.toggle('focus', !!key && td.dataset.rec === recordId && td.dataset.key === key);
-  });
-}
-
 document.addEventListener('click', function(e){
   const b = e.target.closest && e.target.closest('[data-turn],[data-ink]');
   if (!b) return;
   e.stopPropagation();
-  const rec = view === 'form' ? currentRecord() && currentRecord().record_id : selected && selected.rec;
-  if (!rec) return;
+  const current = view === 'form' ? currentRecord() : null;
+  if (!current) return;
+  const rec = current.record_id;
   if (b.dataset.turn) {
     viewTurn[rec] = ((viewTurn[rec] || 0) + 90) % 360;
     applyTurn(b.closest('.frame'), rec);
   } else {
     inkView = !inkView;
     save('inkView', inkView ? '1' : '0');
-    if (view === 'form') renderForm();
-    else if (selected && selected.key) showField(selected.rec, selected.key);
+    renderForm();
+    focusCard(cardIndex, true);
   }
 });
 
@@ -563,7 +711,7 @@ function applyTurn(frame, rec){
   if (!frame) return;
   const deg = viewTurn[rec] || 0;
   const page = frame.querySelector('.pv-page');
-  if (page) fitTurned(page, page.parentNode, page.querySelector('img'), deg, view === 'form' ? 0.66 : 0.44);
+  if (page) fitTurned(page, page.parentNode, page.querySelector('img'), deg, 0.62);
   frame.querySelectorAll('.pv-cropwrap').forEach(function(wrap){
     const img = wrap.querySelector('img');
     if (img) fitTurned(img, wrap, img, deg, 0.30);
@@ -605,10 +753,16 @@ function renderForm(){
     $('#fvCards').innerHTML = '';
     $('#fvApprove').disabled = true;
     $('#fvApproveHint').textContent = '';
+    $('#formBadge').innerHTML = '';
+    $('#fieldsHint').textContent = '';
     return;
   }
   cardIndex = Math.max(0, Math.min(cardIndex, FIELDS.length - 1));
   $('#formWhere').textContent = 'טופס ' + (formIndex + 1) + ' מתוך ' + list.length;
+  $('#formBadge').innerHTML = statusBadge(r);
+  $('#fieldsHint').textContent = r.review_count
+    ? 'נשארו ' + r.review_count + ' שדות לבדיקה · לחיצה על ריבוע מסמנת אותו בטופס'
+    : 'כל השדות נבדקו';
   $('#formSource').textContent = r.source_name + ' · עמוד ' + r.page_number +
     (r.straightened ? ' · ' + r.straightened : '') + (r.error ? ' · הקריאה נכשלה: ' + r.error : '');
   $('#prevForm').disabled = formIndex === 0;
@@ -644,7 +798,7 @@ function renderForm(){
     open ? 'נשארו ' + open + ' שדות לבדיקה' : 'כל השדות נבדקו — אפשר לאשר את הטופס';
 }
 
-function focusCard(i){
+function focusCard(i, noScroll){
   cardIndex = i;
   $$('#fvCards .fcard').forEach(function(c){ c.classList.toggle('now', Number(c.dataset.i) === i); });
   const r = currentRecord();
@@ -656,26 +810,36 @@ function focusCard(i){
     box.insertAdjacentHTML('beforeend', boxHtml(r.fields[FIELDS[i].key]));
   }
   const card = document.querySelector('#fvCards .fcard[data-i="' + i + '"]');
-  if (card) { card.focus({ preventScroll: true }); card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+  if (card) {
+    card.focus({ preventScroll: true });
+    if (!noScroll) card.scrollIntoView({ block: 'nearest', behavior: calm ? 'auto' : 'smooth' });
+  }
 }
 
 function goForm(delta){
   const list = visibleRecords();
   const next = formIndex + delta;
-  if (next < 0 || next >= list.length) return;
+  if (!delta || next < 0 || next >= list.length) return;
   formIndex = next;
   cardIndex = firstOpenCard(list[formIndex]);
   renderForm();
-  focusCard(cardIndex);
+  focusCard(cardIndex, true);
+  $('#formView').scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' });
 }
 $('#prevForm').onclick = function(){ goForm(-1); };
 $('#nextForm').onclick = function(){ goForm(1); };
 $('#formDots').addEventListener('click', function(e){
   const dots = $$('#formDots i');
   const i = dots.indexOf(e.target);
-  if (i >= 0) { formIndex = i; cardIndex = firstOpenCard(visibleRecords()[i]); renderForm(); }
+  if (i >= 0) goForm(i - formIndex);
 });
 $('#fvApprove').onclick = function(){ const r = currentRecord(); if (r) verify(r.record_id); };
+$('#backToTiles').onclick = function(){
+  const r = currentRecord();
+  setView('tiles');
+  const t = r && document.querySelector('.ftile[data-rec="' + r.record_id + '"]');
+  if (t) { t.scrollIntoView({ block: 'center' }); t.focus({ preventScroll: true }); }
+};
 
 $('#fvCards').addEventListener('click', function(e){
   const card = e.target.closest('.fcard');
@@ -690,16 +854,19 @@ $('#fvCards').addEventListener('click', function(e){
 function openRecord(recordId){
   filter = 'all';
   senderFilter = '';
+  query = '';
+  $('#q').value = '';
+  $('#q2').value = '';
   $$('.filters button').forEach(function(x){ x.classList.toggle('on', x.dataset.filter === 'all'); });
   $('#senderFilter').value = '';
   view = 'form';
-  save('view', view);
   const list = visibleRecords();
   formIndex = Math.max(0, list.findIndex(function(r){ return r.record_id === recordId; }));
   cardIndex = list[formIndex] ? firstOpenCard(list[formIndex]) : 0;
   lastSignature = '';
   render(last, true);
-  $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  focusCard(cardIndex, true);
+  $('#formView').scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' });
 }
 
 /* ------------------------------------------------------------ עריכה */
@@ -878,8 +1045,12 @@ document.addEventListener('keydown', function(e){
 
 /* ------------------------------------------------------------ ייצוא וקובץ חדש */
 $('#download').onclick = async function(){
+  if ($('#download').disabled) return;
   const res = await fetch('/api/batches/' + batch + '/export', { method: 'POST' });
-  if (!res.ok) return notice('err', 'הייצוא נכשל', 'נסו שוב.');
+  if (!res.ok) {
+    const e = await res.json().catch(function(){ return {}; });
+    return toast(e.detail || 'הייצוא נכשל — נסו שוב');
+  }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -897,8 +1068,8 @@ $('#again').onclick = function(){
   clearInterval(timer);
   batch = null;
   last = null;
-  selected = null;
   processing = false;
+  finishing = false;
   closePop();
   clearNotices();
   $('#results').classList.add('hidden');
@@ -906,6 +1077,7 @@ $('#again').onclick = function(){
   $('#download').classList.remove('ready');
   $('#file').value = '';
   drop.classList.remove('hidden');
+  setStep(1);
 };
 
 /* ------------------------------------------------------------ רגע הצלחה */
@@ -917,7 +1089,7 @@ function maybeCelebrate(d){
   toast('🎉 כל ' + d.records.length + ' הטפסים מוכנים לייצוא', { big: true, ms: 5000 });
   if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const party = $('#party');
-  const colors = ['#1a8f8f', '#133654', '#ffbf73', '#7fd6a3', '#3cc0c0'];
+  const colors = ['#0068f5', '#0c306a', '#00a8cc', '#c2d96b', '#48c0d8'];
   party.innerHTML = Array.from({ length: 46 }, function(_, i){
     return '<i style="left:' + (Math.random() * 100) + '%;background:' + colors[i % colors.length] +
       ';animation-delay:' + (Math.random() * 0.6) + 's"></i>';
@@ -933,7 +1105,7 @@ const TOUR = [
   { art: '<span class="demo-cell n">939376</span><span class="demo-cell r">00112?344</span><span class="demo-cell g">✓ מאוחדת</span>',
     title: 'כתום = לבדוק', text: 'כתום — המנוע לא בטוח או שבדיקה אוטומטית נכשלה, והסיבה כתובה. ירוק — אדם בדק. תא רגיל — לא נמצא ספק.' },
   { art: '🔍', title: 'מעבר על תא = תקריב',
-    text: 'עכבר או Tab על תא מציגים תקריב של השדה מהטופס. ✓ מאשר, ✎ מתקן, ולכל פעולה יש "בטל". במצב "טופס" עוברים טופס אחרי טופס עם החיצים.' }
+    text: 'בטבלה: עכבר או Tab על תא מציגים תקריב של השדה. באריחים: לחיצה פותחת את הטופס — התמונה למעלה, השדות מתחת, וחצים לטופס הבא. ✓ מאשר, ✎ מתקן, ולכל פעולה יש "בטל". הייצוא לאקסל נפתח כשאין יותר שדות לבדיקה.' }
 ];
 let tourStep = 0;
 function openTour(){ tourStep = 0; drawTour(); $('#tour').classList.remove('hidden'); $('#tourNext').focus(); }

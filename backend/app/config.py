@@ -29,6 +29,8 @@ class Settings:
     claude_effort: str = "high"
     straighten_pages: bool = True  # ליישר מקומית דף עקום או על הצד, לפני הקריאה
     auto_rotate: bool = True  # לזהות דף מסובב (90°/180°/270°) עם Tesseract ולסובב לפני הקריאה
+    # מיתוג המסך: moh = עיצוב משרד הבריאות (באישור נועה, 18/10/2026); neutral = הסמל שלנו
+    brand: str = "moh"
 
     @property
     def model(self) -> str:
@@ -77,6 +79,7 @@ def load_settings() -> Settings:
         ).lower(),
         straighten_pages=_flag("STRAIGHTEN_PAGES"),
         auto_rotate=_flag("AUTO_ROTATE"),
+        brand="neutral" if (os.environ.get("BRAND") or "moh").strip().lower() == "neutral" else "moh",
     )
 
 

@@ -55,6 +55,7 @@ def config() -> dict:
         "max_pages": SETTINGS.max_pages_per_batch,
         "max_files": SETTINGS.max_files_per_batch,
         "sample": SAMPLE_PATH.is_file(),
+        "brand": SETTINGS.brand,
         "fields": [
             {"key": f.key, "label": f.label_he, "multi": f.multi, "hint": f.hint_he}
             for f in FIELDS
@@ -268,6 +269,11 @@ def export_batch(batch_id: str) -> Response:
     batch = _require(batch_id)
     if not batch.records:
         raise HTTPException(409, "אין עדיין רשומות לייצוא.")
+    # הייצוא רק אחרי שהקריאה הסתיימה וכל שדה כתום תוקן או אושר במפורש.
+    if batch.status in ("queued", "processing"):
+        raise HTTPException(409, "הקריאה עוד לא הסתיימה.")
+    if batch.review_total:
+        raise HTTPException(409, f"יש עדיין {batch.review_total} שדות לבדיקה.")
     filename = f"commitments-{batch_id}.xlsx"
     return Response(
         content=workbook_bytes(batch),

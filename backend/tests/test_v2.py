@@ -404,6 +404,23 @@ def test_verify_saves_an_answer_key_entry(api, tmp_path):
     assert forms[0].page_png.is_file()
 
 
+def test_export_is_locked_until_no_field_is_orange(api):
+    client, record = api
+    res = client.post("/api/batches/bat_api/export")
+    assert res.status_code == 409, "אין ייצוא לאקסל כל עוד יש שדה כתום"
+    _approve_open_fields(client, record)
+    res = client.post("/api/batches/bat_api/export")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
+
+
+def test_export_is_locked_while_still_reading(api):
+    client, record = api
+    _approve_open_fields(client, record)
+    store.get("bat_api").status = "processing"
+    assert client.post("/api/batches/bat_api/export").status_code == 409
+
+
 def test_holdout_is_deterministic_and_about_a_third():
     picks = [gold.is_holdout(f"{i:064x}", 1) for i in range(300)]
     assert picks == [gold.is_holdout(f"{i:064x}", 1) for i in range(300)]
@@ -1475,3 +1492,30 @@ def test_index_serves_split_static_files():
     assert "/static/app.css?v=" in html and "/static/app.js?v=" in html and "{{v}}" not in html
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/app.css").status_code == 200
+
+
+# ---------------- 18/10/2026: Ministry of Health branding through a theme
+
+
+def test_brand_defaults_to_ministry_and_can_be_neutral(monkeypatch):
+    from app.config import load_settings
+
+    monkeypatch.delenv("BRAND", raising=False)
+    assert load_settings().brand == "moh"
+    monkeypatch.setenv("BRAND", "neutral")
+    assert load_settings().brand == "neutral"
+    monkeypatch.setenv("BRAND", "something-else")
+    assert load_settings().brand == "moh"
+
+
+def test_page_shows_ministry_branding_without_a_demo_label():
+    from app import api as api_module
+
+    client = TestClient(api_module.app)
+    html = client.get("/").text
+    assert "/static/brand/moh-office.png" in html and "משרד הבריאות" in html
+    assert "דמו להאקתון" not in html
+    assert client.get("/static/brand/moh-office.png").status_code == 200
+    # the gov.il typeface ships with the app, so the page looks right without internet access
+    assert client.get("/static/fonts/rubik-hebrew.woff2").status_code == 200
+    assert client.get("/api/config").json()["brand"] in ("moh", "neutral")

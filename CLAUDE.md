@@ -41,6 +41,6 @@ Build a Hebrew RTL hackathon demo: scanned/photographed commitment forms → rev
 - Measure held-out field accuracy, missed review flags, review burden, time and cost. Never invent performance/business results.
 - Keep technical explanations concise and junior-friendly in Hebrew. Update decisions and limitations when evidence changes scope.
 - No RAG/vector database, agent framework, microservices or extra language without a demonstrated requirement.
-- UI: white/navy/teal, strong typography, document/table split view, clear progress and reasons, keyboard usability. Label as hackathon demo; no official logo/affiliation claim without authorization.
-- Ministry-inspired visual design is welcome. Apply approved branding through a theme; do not present an unaffiliated demo as an official service.
+- UI: white/navy/teal, strong typography, document/table split view, clear progress and reasons, keyboard usability.
+- Branding: Ministry of Health / gov.il look, including the ministry logo, approved by the project owner (Noa) on 2026-10-18 for the presentation to the ministry. Applied through a theme (BRAND=moh|neutral). No "hackathon demo" label in the UI. Do not add false claims (e.g. "official service", "approved by the ministry").
 - Before completion: run checks appropriate to the change, report result and remaining limitation. Do not call unimplemented safeguards complete.
