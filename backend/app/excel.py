@@ -66,17 +66,45 @@ def record_row(record: FormRecord) -> list[str]:
     ]
 
 
+def headers() -> list[str]:
+    """The header row of the file — the same list for the file and for the preview."""
+    return [f.label_he for f in FIELDS] + list(EXTRA_COLUMNS)
+
+
+def preview(batch: Batch) -> dict:
+    """Exactly the data rows the file will contain, for the screen to show before download.
+
+    Built from the same `record_rows` and `neutralize` as the workbook, so what the
+    secretary sees is what the lab gets.
+    """
+    rows = []
+    for number, record in enumerate(batch.records, start=1):
+        for values in record_rows(record):
+            rows.append({
+                "form": number,
+                "record_id": record.record_id,
+                "cells": [neutralize(v) for v in values],
+            })
+    return {
+        "headers": headers(),
+        "rows": rows,
+        "forms": len(batch.records),
+        "row_count": len(rows),
+        "sources": len(batch.accepted_sources),
+        "commitment_column": next(i for i, f in enumerate(FIELDS) if f.key == COMMITMENT_KEY),
+    }
+
+
 def build_workbook(batch: Batch) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "התחייבויות"
     ws.sheet_view.rightToLeft = True
 
-    headers = [f.label_he for f in FIELDS] + list(EXTRA_COLUMNS)
     widths = [14, 16, 16, 18, 20, 22, 20, 30, 12, 12, 46]
     thin = Side(style="thin", color=LINE)
 
-    for index, (label, width) in enumerate(zip(headers, widths), start=1):
+    for index, (label, width) in enumerate(zip(headers(), widths), start=1):
         cell = ws.cell(row=1, column=index, value=label)
         cell.fill = PatternFill("solid", fgColor=NAVY)
         cell.font = Font(bold=True, color="FFFFFF", size=11)

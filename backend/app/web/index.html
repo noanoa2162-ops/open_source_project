@@ -58,19 +58,20 @@
 
   <div class="pagehead">
     <h1 id="pageTitle">קליטת טפסי התחייבות</h1>
-    <p>העלאת טפסים סרוקים או מצולמים, בדיקה ואישור של כל שדה, וייצוא לאקסל.</p>
+    <p>מעלים טפסים, בודקים, מייצאים לאקסל.</p>
   </div>
 
   <div id="notices"></div>
 
   <!-- אזור: העלאת טפסים -->
   <section class="strip" id="uploadStrip" aria-labelledby="uploadTitle">
-    <h2 class="striptitle" id="uploadTitle">העלאת טפסים</h2>
+    <h2 class="sr-only" id="uploadTitle">העלאת טפסים</h2>
 
+    <!-- שלבי העבודה: פס דק אחד, בלי כרטיסים -->
     <ol class="steps" id="steps" aria-label="שלבי העבודה">
-      <li data-step="1" class="now"><b>1</b><span><strong>העלאת טפסים</strong>PDF או תמונות, כמה שרוצים</span></li>
-      <li data-step="2"><b>2</b><span><strong>בדיקה ואישור</strong>שדות מסומנים בכתום — לבדוק ולאשר</span></li>
-      <li data-step="3"><b>3</b><span><strong>ייצוא לאקסל</strong>שורה לכל מספר התחייבות</span></li>
+      <li data-step="1" class="now"><b>1</b><span>העלאה</span></li>
+      <li data-step="2"><b>2</b><span>בדיקה ואישור</span></li>
+      <li data-step="3"><b>3</b><span>ייצוא לאקסל</span></li>
     </ol>
 
     <section id="drop" class="card" aria-label="העלאת טפסים">
@@ -91,15 +92,13 @@
           <rect x="273" y="59" width="30" height="18" class="ok"/>
         </g>
       </svg>
-      <h3>גררו לכאן טפסי התחייבות</h3>
-      <p>אפשר כמה קבצים יחד — תמונות, קובצי PDF, או שילוב של שניהם</p>
+      <h3>גררו לכאן טפסים</h3>
+      <p>או</p>
       <div class="actions">
         <button class="primary big" id="browse">בחירת קבצים</button>
-        <button class="secondary big hidden" id="sampleBtn">▶ נסו עם טופס דוגמה</button>
       </div>
       <input type="file" id="file" class="hidden" accept=".pdf,.jpg,.jpeg,.png" multiple>
-      <small id="limits"></small>
-      <small class="model" id="modelName"></small>
+      <small id="limits">PDF, JPG או PNG</small>
     </section>
 
     <!-- התקדמות חיה: גלגל שסופר את הטפסים, ומאחוריו הטפסים עולים כאריחים בהירים -->
@@ -118,6 +117,8 @@
               </defs>
               <circle class="track" cx="60" cy="60" r="52"/>
               <circle class="arc" id="ringArc" cx="60" cy="60" r="52"/>
+              <!-- שובל שמקיף כל הזמן כל עוד עובדים — שרואים שהמערכת חיה -->
+              <circle class="orbit" cx="60" cy="60" r="44"/>
             </svg>
             <div class="count">
               <b id="ringNum">0</b>
@@ -127,6 +128,7 @@
           </div>
           <strong id="pTitle">מעבד…</strong>
           <span id="pCount"></span>
+          <span id="pTime"></span>
           </div>
         </div>
       </div>
@@ -136,7 +138,7 @@
 
   <!-- אזור: טפסים שנקלטו -->
   <section id="results" class="strip hidden" aria-labelledby="resultsTitle">
-    <h2 class="striptitle" id="resultsTitle">טפסים שנקלטו</h2>
+    <h2 class="sr-only" id="resultsTitle">טפסים שנקלטו</h2>
 
     <!-- סינון, בסגנון פאנל הסינון של דף השירותים -->
     <div class="filterbar card" role="search" aria-label="סינון הטפסים">
@@ -162,13 +164,7 @@
     <!-- ראש התוצאות: "N טפסים" + מתג תצוגה -->
     <div class="resulthead">
       <h3 id="resultCount"><b id="cRecords">0</b> טפסים</h3>
-      <span class="meta">
-        <span id="cReviewChip" class="badge review"><b id="cReview">0</b> שדות לבדיקה</span>
-        <span>קבצים: <b id="cSources">0</b></span>
-        <span>זמן: <b id="cTime">—</b></span>
-        <span>עלות: <b id="cCost">—</b></span>
-        <span class="src">מקור: <b id="cFile"></b></span>
-      </span>
+      <span id="cReviewChip" class="badge review"><b id="cReview">0</b> שדות לבדיקה</span>
       <span class="grow"></span>
       <div class="seg" role="tablist" aria-label="מצב תצוגה">
         <button role="tab" id="viewTiles" aria-selected="true">▦ אריחים</button>
@@ -193,54 +189,43 @@
       <div class="empty-filter hidden" id="tilesEmpty">אין טפסים שמתאימים לסינון הזה.</div>
     </div>
 
-    <!-- טופס פתוח (מתוך האריחים): התמונה למעלה, 7 ריבועי השדות, ומתחת הקודם/הבא -->
+    <!-- טופס פתוח: רק התמונה, ומתחתיה שורה אחת של ריבועי שדות -->
     <div id="formView" class="hidden">
-      <div class="formtop card">
-        <button class="secondary" id="backToTiles">→ חזרה לכל הטפסים</button>
-        <div class="where">
-          <strong id="formWhere">טופס 1 מתוך 1</strong>
-          <span id="formBadge"></span>
-          <span id="formSource" class="sub"></span>
-        </div>
+      <div class="formtop">
+        <button class="secondary back" id="backToTiles">→ כל הטפסים</button>
+        <strong id="formWhere">1 / 1</strong>
+        <span id="formBadge"></span>
+        <span class="grow"></span>
+        <button class="iconbtn" id="prevForm" aria-label="הטופס הקודם" title="הטופס הקודם">→</button>
+        <button class="iconbtn" id="nextForm" aria-label="הטופס הבא" title="הטופס הבא">←</button>
       </div>
-      <div class="card viewer">
+      <!-- טופס שהקריאה שלו נכשלה: הסיבה, וכפתור "קרא שוב" שקודם שואל -->
+      <div class="failbar hidden" id="fvFailed" role="status" aria-live="polite"></div>
+      <div class="viewer">
         <div class="frame" id="fvFrame"></div>
+        <!-- תקריב קבוע ליד הטופס: נפתח בלחיצה על ריבוע שדה -->
+        <div class="zoompanel hidden" id="fvZoom" aria-live="polite"></div>
       </div>
-      <h3 class="fieldsTitle">שדות הטופס <span class="sub" id="fieldsHint"></span></h3>
-      <div class="cards" id="fvCards" role="list"></div>
-      <div class="formnav card">
-        <button class="secondary big" id="prevForm" aria-label="הטופס הקודם">→ הטופס הקודם</button>
-        <div class="mid">
-          <button class="primary big" id="fvApprove">✓ אשר את הטופס</button>
-          <span class="sub" id="fvApproveHint"></span>
-          <div class="dots" id="formDots" aria-hidden="true"></div>
-        </div>
-        <button class="secondary big" id="nextForm" aria-label="הטופס הבא">הטופס הבא ←</button>
+      <div class="cards" id="fvCards" role="list" aria-label="שדות הטופס"></div>
+      <div class="formnav">
+        <div class="dots" id="formDots" aria-hidden="true"></div>
+        <button class="primary" id="fvApprove">✓ אישור הטופס</button>
       </div>
-      <p class="keys">מקלדת: <kbd>←</kbd>/<kbd>→</kbd> טופס הבא/קודם · <kbd>↑</kbd>/<kbd>↓</kbd> שדה ·
-        <kbd>Enter</kbd> אישור · <kbd>E</kbd> תיקון · <kbd>Esc</kbd> ביטול</p>
     </div>
   </section>
 </main>
 
 <footer class="sitefoot">
   <div class="inner">
-    <div class="fcol fbrand">
+    <div class="fbrand">
       <img src="/static/brand/moh-office.png" alt="" id="footMark">
-      <span><strong id="footOrg">משרד הבריאות</strong><small id="footUnit">המעבדה המרכזית לנגיפים · קליטת טפסי התחייבות</small></span>
+      <span><strong id="footOrg">משרד הבריאות</strong><small id="footUnit">המעבדה המרכזית לנגיפים</small></span>
     </div>
-    <div class="fcol">
-      <h4>על המערכת</h4>
-      <p>קריאה אוטומטית של טפסי התחייבות, בדיקה אנושית של כל שדה מסומן, וייצוא לאקסל.
-        אין להסתמך על הפלט ללא בדיקה.</p>
-    </div>
-    <div class="fcol">
-      <h4>מקרא</h4>
-      <ul>
-        <li><span class="sw review"></span> לבדיקה — המנוע לא בטוח או שבדיקה נכשלה</li>
-        <li><span class="sw approved"></span> מאושר — נבדק על ידי אדם</li>
-      </ul>
-    </div>
+    <p class="fnote">כל שדה מסומן נבדק על ידי אדם לפני ייצוא.</p>
+    <ul class="legend">
+      <li><span class="sw review"></span> לבדיקה</li>
+      <li><span class="sw approved"></span> מאושר</li>
+    </ul>
   </div>
 </footer>
 
@@ -253,6 +238,73 @@
 
 <!-- הודעות קופצות -->
 <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<!-- תצוגה מקדימה של קובץ האקסל: בדיוק השורות שייכנסו לקובץ, לפני ההורדה -->
+<div id="xlPreview" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="xlTitle" aria-describedby="xlNote">
+  <div class="modalbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="xlTitle">תצוגה מקדימה של קובץ האקסל</h2>
+        <div class="xlsum">
+          <span class="badge ready" id="xlSummary"></span>
+          <span class="sub" id="xlSources"></span>
+        </div>
+        <p class="sub" id="xlNote">שורה לכל מספר התחייבות. טופס עם כמה מספרים מופיע בכמה שורות, מסומן בפס כחול.</p>
+      </div>
+      <button class="closebtn" id="xlClose" aria-label="סגירת התצוגה המקדימה" title="סגירה">✕</button>
+    </div>
+    <div class="xlwrap" tabindex="0" aria-label="שורות הקובץ">
+      <table class="xltable">
+        <thead><tr id="xlHead"></tr></thead>
+        <tbody id="xlBody"></tbody>
+      </table>
+    </div>
+    <div class="modalfoot">
+      <span class="xlfile" id="xlFile"></span>
+      <span class="grow"></span>
+      <button class="secondary" id="xlCancel">ביטול</button>
+      <button class="primary" id="xlDownload">⬇ הורדת הקובץ</button>
+    </div>
+  </div>
+</div>
+
+<!-- אישור לפני קריאה חוזרת: כל קריאה עולה כסף, ולכן לא קוראים שוב בלי "כן" -->
+<div id="rrConfirm" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="rrTitle" aria-describedby="rrText">
+  <div class="modalbox rrbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="rrTitle">לקרוא את הטופס שוב?</h2>
+        <p class="sub" id="rrText">קריאה חוזרת של הטופס הזה שולחת אותו שוב ל-Claude ועולה כמו קריאת טופס אחד. להמשיך?</p>
+      </div>
+    </div>
+    <div class="modalfoot">
+      <span class="grow"></span>
+      <button class="secondary" id="rrCancel">ביטול</button>
+      <button class="primary" id="rrYes">↻ כן, קרא שוב</button>
+    </div>
+  </div>
+</div>
+
+<!-- הגדלת הטופס: העמוד בגדול על כל המסך, עם + / −, גרירה וגלגלת -->
+<div id="pgZoom" class="pzmodal hidden" role="dialog" aria-modal="true" aria-labelledby="pzTitle">
+  <div class="pzbar">
+    <strong id="pzTitle">הגדלת הטופס</strong>
+    <span class="grow"></span>
+    <div class="pzgroup" role="group" aria-label="הגדלה">
+      <button class="pzbtn" id="pzOut" aria-label="הקטנה" title="הקטנה (−)">−</button>
+      <span class="pzpct" id="pzPct" aria-live="polite">100%</span>
+      <button class="pzbtn" id="pzIn" aria-label="הגדלה" title="הגדלה (+)">+</button>
+    </div>
+    <button class="pzwide" id="pzFit" title="התאמה למסך (0)">התאמה למסך</button>
+    <button class="pzwide" id="pzBox" title="הגדלת האזור המסומן בכתום">לשדה המסומן</button>
+    <button class="pzbtn" id="pzTurn" aria-label="סיבוב" title="סיבוב">↻</button>
+    <button class="pzbtn" id="pzClose" aria-label="סגירת ההגדלה" title="סגירה (Esc)">✕</button>
+  </div>
+  <div class="pzview" id="pzView" tabindex="0" aria-label="העמוד המוגדל — גררו כדי לזוז, גלגלת או +/− להגדלה">
+    <div class="pzpan" id="pzPan"><div class="pzrot" id="pzRot"></div></div>
+  </div>
+  <p class="pzhint">גררו כדי לזוז · גלגלת או לחיצה כפולה להגדלה · Esc לסגירה</p>
+</div>
 
 <!-- סיור קצר -->
 <div id="tour" class="tour hidden" role="dialog" aria-modal="true" aria-labelledby="tourTitle">

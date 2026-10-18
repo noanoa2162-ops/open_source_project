@@ -360,7 +360,7 @@ def test_api_serves_values_and_crop_box(api):
     field = data["records"][0]["fields"]["national_id"]
     assert field["values"] == ["001122344"]
     assert field["crop_box"] is not None
-    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "can_undo"}
+    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note", "can_undo"}
 
 
 def test_api_crop_endpoint(api):
@@ -419,6 +419,25 @@ def test_export_is_locked_while_still_reading(api):
     _approve_open_fields(client, record)
     store.get("bat_api").status = "processing"
     assert client.post("/api/batches/bat_api/export").status_code == 409
+
+
+def test_excel_preview_matches_the_file_exactly(api):
+    """What the screen shows before download is exactly what the file contains."""
+    from io import BytesIO
+    from openpyxl import load_workbook
+
+    client, record = api
+    record.fields["commitment_numbers"].values = ["730578626", "=SUM(A1)"]
+    data = client.get("/api/batches/bat_api/export/preview").json()
+    assert data["forms"] == 1 and data["row_count"] == 2, "שורה לכל מספר התחייבות"
+    assert [r["form"] for r in data["rows"]] == [1, 1]
+
+    batch = store.get("bat_api")
+    sheet = load_workbook(BytesIO(workbook_bytes(batch))).active
+    file_rows = [[c.value or "" for c in row] for row in sheet.iter_rows(min_row=1, max_row=1 + data["row_count"])]
+    assert file_rows[0] == data["headers"]
+    assert file_rows[1:] == [r["cells"] for r in data["rows"]]
+    assert data["rows"][1]["cells"][data["commitment_column"]] == "'=SUM(A1)", "נוסחה מנוטרלת גם בתצוגה"
 
 
 def test_holdout_is_deterministic_and_about_a_third():
@@ -527,7 +546,7 @@ def test_claude_answer_becomes_a_reading_with_its_locations():
 
     judge = ClaudeExtractionProvider(api_key="test", model="claude-sonnet-5-5")
     parsed = _page_reading(
-        national_id=FieldReading(values=["0011223344"], legibility="clear", tile=1, box=[100, 300, 400, 340]),
+        national_id=FieldReading(values=["0011223344"], legibility="clear", tile=0, box=[100, 300, 400, 340]),
     )
     usage = SimpleNamespace(input_tokens=5000, output_tokens=800,
                             cache_read_input_tokens=6000, cache_creation_input_tokens=0)
@@ -676,7 +695,7 @@ def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
     assert raw.model == "claude-opus-5-5"
 
 
-def test_claude_sends_the_page_once(tmp_path):
+def test_claude_sends_the_whole_page_and_four_sharp_quarters(tmp_path):
     from app.providers import claude_vision as cv
 
     sent = {}
@@ -686,9 +705,78 @@ def test_claude_sends_the_page_once(tmp_path):
     judge.extract(page)
 
     images = [c for c in sent["content"] if c["type"] == "image"]
-    assert len(images) == 1, "תמונה אחת — העמוד עצמו"
+    assert len(images) == 5, "העמוד המלא ועוד ארבעה רבעים חדים"
     assert images[0]["source"]["data"] == cv.page_png_b64(page)
+    labels = [c["text"] for c in sent["content"] if c["type"] == "text"][:5]
+    assert labels[0].startswith("תמונה 0") and labels[4].startswith("תמונה 4")
     assert sent["content"][-1]["type"] == "text"
+
+def _blocking_client(sent_types, block, status=418):
+    """Blocks (like NetFree's word filter) the first `block` requests, then answers."""
+    import anthropic
+    from types import SimpleNamespace
+
+    def stream(**kwargs):
+        image = next(c for c in kwargs["messages"][0]["content"] if c["type"] == "image")
+        sent_types.append(image["source"]["media_type"])
+        if len(sent_types) <= block:
+            raise _api_error(anthropic.APIStatusError, "blocked", status)
+        return _FakeStream(_claude_response(_page_reading()))
+
+    return SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)))
+
+
+def test_filter_block_resends_the_page_in_another_encoding(tmp_path):
+    from app.providers import claude_vision as cv
+
+    sent = []
+    judge = cv.ClaudeExtractionProvider(api_key="test")
+    judge._client = _blocking_client(sent, block=1)
+    raw = judge.extract(_swatches(tmp_path / "page-001.png"))
+    assert sent == ["image/png", "image/jpeg"], "PNG נחסם → אותו דף כ-JPEG"
+    assert raw.values
+
+
+def test_filter_blocking_every_encoding_says_so_and_is_not_fatal(tmp_path):
+    from app.providers import claude_vision as cv
+    from app.providers.base import ExtractionError
+
+    sent = []
+    judge = cv.ClaudeExtractionProvider(api_key="test")
+    judge._client = _blocking_client(sent, block=99)
+    with pytest.raises(ExtractionError) as caught:
+        judge.extract(_swatches(tmp_path / "page-001.png"))
+    assert len(sent) == len(cv.ENCODINGS) == 3, "שלושה קידודים ואז עוצרים"
+    assert "NetFree" in str(caught.value) and "לא חויבה" in str(caught.value)
+    assert caught.value.fatal is False, "שאר הטפסים ממשיכים"
+
+
+def test_other_errors_do_not_trigger_another_encoding(tmp_path):
+    import anthropic
+
+    from app.providers import claude_vision as cv
+    from app.providers.base import ExtractionError
+
+    sent = []
+    judge = cv.ClaudeExtractionProvider(api_key="test")
+    judge._client = _blocking_client(sent, block=99, status=500)
+    with pytest.raises(ExtractionError):
+        judge.extract(_swatches(tmp_path / "page-001.png"))
+    assert sent == ["image/png"], "שגיאת שרת — לא שולחים שוב בקידוד אחר"
+    del anthropic
+
+
+def test_jpeg_versions_keep_the_page_size(tmp_path):
+    import base64
+    import io
+
+    from app.providers.claude_vision import MAX_LONG_SIDE, page_jpeg_b64
+
+    page = png(tmp_path / "p.png", size=(2481, 3509))
+    for gray in (False, True):
+        with Image.open(io.BytesIO(base64.b64decode(page_jpeg_b64(page, gray=gray)))) as sent:
+            assert sent.format == "JPEG" and max(sent.size) == MAX_LONG_SIDE
+            assert sent.mode == ("L" if gray else "RGB")
 
 
 def test_api_crop_in_ink_view(api):

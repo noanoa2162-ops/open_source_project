@@ -43,6 +43,8 @@ class RawExtraction:
     model: str = ""
     legibility: dict[str, str] = field(default_factory=dict)
     regions: dict[str, Region | None] = field(default_factory=dict)
+    # מיקום לכל ערך בנפרד, באותו סדר כמו values (None = לערך הזה אין מיקום)
+    value_regions: dict[str, list[Region | None]] = field(default_factory=dict)
     # שדות הקשר שאינם מיוצאים, אבל מאפשרים לבדוק את תאריך הקבלה מול המסמך.
     context: dict[str, str] = field(default_factory=dict)
     template: str = ""

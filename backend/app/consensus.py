@@ -16,7 +16,7 @@ import unicodedata
 
 from app.entities import canonical_sender
 from app.fields import FIELDS, FIELDS_BY_KEY
-from app.models import FormRecord
+from app.models import STATE_REVIEW, FormRecord
 from app.providers.base import LEGIBILITY_ILLEGIBLE, LEGIBILITY_PARTIAL, RawExtraction
 
 UNREADABLE = "?"
@@ -60,13 +60,17 @@ def normalize(key: str, value: str) -> str:
     return text
 
 
-def _normalized(key: str, reading: RawExtraction) -> list[str]:
+def _normalized(key: str, reading: RawExtraction) -> tuple[list[str], list]:
+    """Clean values, without repeats — and the position of each, in the same order."""
     seen: list[str] = []
-    for value in reading.values.get(key, []):
+    places: list = []
+    given = reading.value_regions.get(key) or []
+    for i, value in enumerate(reading.values.get(key, [])):
         clean = normalize(key, value)
         if clean and clean not in seen:
             seen.append(clean)
-    return seen
+            places.append(given[i] if i < len(given) else None)
+    return seen, places if any(places) else []
 
 
 def combine(record: FormRecord, reading: RawExtraction) -> None:
@@ -80,7 +84,7 @@ def combine(record: FormRecord, reading: RawExtraction) -> None:
     for spec in FIELDS:
         field = record.fields[spec.key]
         field.region = reading.regions.get(spec.key)
-        field.values = _normalized(spec.key, reading)
+        field.values, field.value_regions = _normalized(spec.key, reading)
         doubt = reading.legibility.get(spec.key) in _DOUBT
         if doubt or any(UNREADABLE in v for v in field.values):
             field.flag("illegible")
@@ -90,6 +94,36 @@ def combine(record: FormRecord, reading: RawExtraction) -> None:
     if record.low_resolution:
         for key in HANDWRITING_PRONE:
             record.fields[key].flag("low_resolution")
+
+
+NAME_KEYS = ("first_name", "last_name")
+
+
+def merge_names(record: FormRecord, check) -> bool:
+    """Fold the close-up re-reading of the name into the record. Returns whether it
+    was used. Never makes a field green: agreement keeps it orange with a reason
+    that it was read twice; disagreement shows both readings, the close-up first."""
+    if check is None or not check.found:
+        return False
+    used = False
+    for key in NAME_KEYS:
+        field = record.fields[key]
+        fresh: list[str] = []
+        for value in getattr(check, key):
+            clean = normalize(key, value)
+            if clean and clean not in fresh:
+                fresh.append(clean)
+        if not fresh:
+            continue
+        used = True
+        if fresh == field.values:
+            if field.state == STATE_REVIEW:
+                field.flag("names_read_twice_same")
+            continue
+        field.values = fresh + [v for v in field.values if v not in fresh]
+        field.value_regions = []  # המיקומים היו של הקריאה הראשונה
+        field.flag("names_two_readings")
+    return used
 
 
 def _context(reading: RawExtraction) -> dict[str, str]:

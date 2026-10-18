@@ -42,6 +42,10 @@ class ExtractedField:
     reasons: list[str] = field(default_factory=list)
     model_note: str = ""
     region: Region | None = None  # איפה הערך בעמוד — לתקריב ולריבוע על הטופס המלא
+    # מה ידוע על המיקום: verified (נמצא בעמוד) | fixed (תוקן מקומית) | reader (לפי המנוע)
+    region_note: str = ""
+    # מיקום לכל ערך בנפרד, באותו סדר כמו values — תקריב לכל מספר כשיש כמה
+    value_regions: list[Region | None] = field(default_factory=list)
     # המצבים הקודמים של השדה, לכפתור "בטל" במסך: {values, state, reasons}
     history: list[dict] = field(default_factory=list)
 

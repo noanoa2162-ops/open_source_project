@@ -15,7 +15,7 @@ from app import gold, pipeline, store
 from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
-from app.excel import workbook_bytes
+from app.excel import preview as excel_preview, workbook_bytes
 from app.fields import FIELDS, FIELDS_BY_KEY
 from app.files import ACCEPTED_LABEL, sniff_kind
 from app.models import (
@@ -167,21 +167,35 @@ def field_crop(
     page_number: int,
     field_key: str,
     ink: bool = False,
+    i: int | None = None,
 ) -> FileResponse:
     """The enlarged cut-out of one field, for the lower half of the split panel."""
     batch = _require(batch_id)
-    if field_key not in FIELDS_BY_KEY:
+    if field_key not in FIELDS_BY_KEY and field_key != FULL_NAME:
         raise HTTPException(404, "שדה לא מוכר.")
     record = next(
         (r for r in batch.records if r.source_index == source_index and r.page_number == page_number),
         None,
     )
-    region = record.fields[field_key].region if record else None
+    if not record:
+        region = None
+    elif field_key == FULL_NAME:
+        region = full_name_region(record)
+    else:
+        field = record.fields[field_key]
+        region = field.region
+        if i is not None:
+            # תקריב של ערך אחד, כשיש כמה (למשל שני מספרים מרכזיים)
+            region = field.value_regions[i] if 0 <= i < len(field.value_regions) else None
     page = pipeline.page_image_path(batch_id, source_index, page_number)
     if region is None or not page.is_file():
         # אין מיקום — לא ממציאים תקריב. המסך יציג את העמוד המלא בלבד.
         raise HTTPException(404, "אין מיקום לשדה זה.")
-    target = pipeline.crop_path(batch_id, source_index, page_number, field_key)
+    target = pipeline.crop_path(batch_id, source_index, page_number,
+                                field_key if i is None else f"{field_key}-{i}")
+    # המיקום בשם הקובץ: אחרי קריאה חוזרת או תיקון מיקום — תקריב חדש, לא הישן
+    place = hashlib.sha256(repr(tuple(round(v, 4) for v in region)).encode()).hexdigest()[:8]
+    target = target.with_name(f"{target.stem}-{place}.png")
     if ink:
         # אותה הגדלה מגרסת "דיו מודגש": בלי מרקרים, כתב היד שחור. מקומי, בלי עלות.
         page = ink_enhanced(page)
@@ -189,6 +203,21 @@ def field_crop(
     return FileResponse(
         crop_field(page, region, target), media_type="image/png", headers={"Cache-Control": "no-store"}
     )
+
+
+@app.post("/api/records/{record_id}/reread")
+def reread_record(record_id: str) -> dict:
+    """Read one failed form again. Costs one reading — the screen asks the person
+    first; nothing calls this on its own."""
+    found = store.find_record(record_id)
+    if found is None:
+        raise HTTPException(404, "הרשומה לא נמצאה.")
+    batch, _ = found
+    try:
+        pipeline.reread(batch.batch_id, record_id)
+    except pipeline.RereadRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _serialise(batch)
 
 
 @app.post("/api/records/{record_id}/verify")
@@ -234,6 +263,8 @@ def update_record(record_id: str, payload: dict) -> dict:
     if "values" in payload:
         field.remember()
         values = [str(v).strip() for v in payload["values"] if str(v).strip()]
+        if len(values) != len(field.values):
+            field.value_regions = []  # המיקומים לפי ערך כבר לא תואמים
         field.values = values
         # תיקון אנושי מנקה את הדגלים האוטומטיים — האדם ראה את המקור.
         field.settle()
@@ -264,6 +295,12 @@ def undo_field(record_id: str, payload: dict) -> dict:
     return _serialise(batch)
 
 
+@app.get("/api/batches/{batch_id}/export/preview")
+def export_preview(batch_id: str) -> dict:
+    """The rows the Excel file will contain — shown on screen before the download."""
+    return excel_preview(_require(batch_id))
+
+
 @app.post("/api/batches/{batch_id}/export")
 def export_batch(batch_id: str) -> Response:
     batch = _require(batch_id)
@@ -290,6 +327,21 @@ def delete_batch(batch_id: str) -> dict:
     if not store.delete(batch_id):
         raise HTTPException(404, "לא נמצא.")
     return {"deleted": True}
+
+
+FULL_NAME = "full_name"
+SAME_LINE = 0.08  # שתי תיבות השם "באותו אזור" — עד 8% מגובה הדף בין המרכזים
+
+
+def full_name_region(record) -> tuple | None:
+    """One box around first and last name together, when both sit in the same area
+    — the reader sometimes swaps them, so the zoom shows both side by side."""
+    first, last = record.fields["first_name"].region, record.fields["last_name"].region
+    if not first or not last:
+        return None
+    if abs((first[1] + first[3]) / 2 - (last[1] + last[3]) / 2) > SAME_LINE:
+        return None
+    return (min(first[0], last[0]), min(first[1], last[1]), max(first[2], last[2]), max(first[3], last[3]))
 
 
 def _require(batch_id: str) -> Batch:
@@ -340,6 +392,7 @@ def _serialise(batch: Batch) -> dict:
                 "seconds": r.seconds,
                 "verified": r.verified,
                 "straightened": r.straightened,
+                "full_name_crop": full_name_region(r) is not None,
                 "fields": {
                     key: {
                         "values": f.values,
@@ -348,6 +401,10 @@ def _serialise(batch: Batch) -> dict:
                         "reason_codes": f.reasons,
                         # האזור שנחתך בפועל — מסומן בריבוע על העמוד המלא
                         "crop_box": list(padded(f.region)) if f.region else None,
+                        "region_note": f.region_note,
+                        # תיבה לכל ערך (ריקה כשאין מיקום נפרד לכל ערך)
+                        "crop_boxes": [list(padded(r)) if r else None for r in f.value_regions]
+                        if len(f.value_regions) == len(f.values) and len(f.values) > 1 else [],
                         "can_undo": bool(f.history),
                     }
                     for key, f in r.fields.items()

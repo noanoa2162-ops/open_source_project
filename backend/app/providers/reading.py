@@ -9,6 +9,7 @@ accurate in the box format it was trained on.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -36,7 +37,9 @@ class FieldReading(BaseModel):
     values: list[str]
     legibility: str
     tile: int | None = None
-    box: list[float] | None = None
+    box: list[float] | None = None  # תיבה אחת סביב כל הערכים (תשובות ישנות: רק זו)
+    # תיבה לכל ערך, באותו סדר כמו values: [tile, xmin, ymin, xmax, ymax] (או 4 מספרים בלי tile)
+    boxes: list[list[float] | None] | None = None
 
 
 class PageReading(BaseModel):
@@ -52,6 +55,71 @@ class PageReading(BaseModel):
     birth_date: str | None = None
     upside_down: bool = False
     note: str = ""
+
+
+# ------------------------------------------------------------ שלב שני: שמות מתוך תקריב
+NAMES_NAME = "names_v1"
+NAMES_PATH = PROMPT_PATH.parent / f"{NAMES_NAME}.md"
+NAMES_PROMPT = NAMES_PATH.read_text(encoding="utf-8")
+NAMES_VERSION = NAMES_NAME + "-" + hashlib.sha256(NAMES_PROMPT.encode("utf-8")).hexdigest()[:8]
+
+
+class NameReading(BaseModel):
+    found: bool
+    first_name: list[str]
+    first_legibility: str
+    last_name: list[str]
+    last_legibility: str
+
+
+@dataclass
+class NameCheck:
+    """The second, close-up reading of the patient's name."""
+
+    found: bool = False
+    first_name: list[str] = field(default_factory=list)
+    last_name: list[str] = field(default_factory=list)
+    legibility: dict[str, str] = field(default_factory=dict)
+    model: str = ""
+    usage: Usage | None = None
+
+
+def to_name_check(reading: NameReading, model: str, usage: Usage | None) -> NameCheck:
+    def level(raw: str) -> str:
+        value = (raw or "").strip().lower()
+        return value if value in LEGIBILITY_VALUES else LEGIBILITY_PARTIAL
+
+    clean = lambda values: [v.strip() for v in values if v and v.strip()]  # noqa: E731
+    return NameCheck(
+        found=bool(reading.found),
+        first_name=clean(reading.first_name),
+        last_name=clean(reading.last_name),
+        legibility={"first_name": level(reading.first_legibility), "last_name": level(reading.last_legibility)},
+        model=model,
+        usage=usage,
+    )
+
+
+def _one(region_of, entry) -> Region | None:
+    """A box for one value: [tile, xmin, ymin, xmax, ymax], or just the four numbers."""
+    if not entry:
+        return None
+    if len(entry) == 5:
+        try:
+            tile = int(entry[0])
+        except (TypeError, ValueError):
+            return None
+        return region_of(list(entry[1:]), tile)
+    return region_of(list(entry), None)
+
+
+def union(regions: list[Region | None]) -> Region | None:
+    """The smallest region holding all of them, or None when there are none."""
+    found = [r for r in regions if r]
+    if not found:
+        return None
+    return (min(r[0] for r in found), min(r[1] for r in found),
+            max(r[2] for r in found), max(r[3] for r in found))
 
 
 def prompt_version(text: str) -> str:
@@ -80,20 +148,30 @@ def load_prompt(coordinates_section: str) -> str:
 def to_raw(
     reading: PageReading,
     model: str,
-    region_of: Callable[[FieldReading], Region | None],
+    region_of: Callable[[list[float] | None, int | None], Region | None],
     usage: Usage | None,
 ) -> RawExtraction:
+    """`region_of(box, tile)` turns one box, in the units of the image it was
+    measured in, into a region of the page (0–1), or None when it is unusable."""
     values: dict[str, list[str]] = {}
     legibility: dict[str, str] = {}
     regions: dict[str, Region | None] = {}
+    value_regions: dict[str, list[Region | None]] = {}
 
     for spec in FIELDS:
         field: FieldReading = getattr(reading, spec.key)
-        values[spec.key] = [v.strip() for v in field.values if v and v.strip()]
+        boxes = list(field.boxes or [])
+        kept, kept_regions = [], []
+        for i, raw in enumerate(field.values):
+            if raw and raw.strip():
+                kept.append(raw.strip())
+                kept_regions.append(_one(region_of, boxes[i]) if i < len(boxes) else None)
+        values[spec.key] = kept
+        value_regions[spec.key] = kept_regions if any(kept_regions) else []
         level = (field.legibility or "").strip().lower()
         # ערך לא מוכר מתפרש כספק, לא כוודאות.
         legibility[spec.key] = level if level in LEGIBILITY_VALUES else LEGIBILITY_PARTIAL
-        regions[spec.key] = region_of(field)
+        regions[spec.key] = union(kept_regions) or region_of(field.box, field.tile)
 
     context = {
         key: value.strip()
@@ -106,6 +184,7 @@ def to_raw(
         model=model,
         legibility=legibility,
         regions=regions,
+        value_regions=value_regions,
         context=context,
         template=(reading.template or "").strip(),
         usage=usage,

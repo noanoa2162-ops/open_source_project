@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
@@ -25,12 +26,18 @@ from PIL import Image
 from app.config import SETTINGS, cost_usd
 from app.providers.base import ExtractionError, RawExtraction, Region, Usage, clamp_region
 from app.providers.reading import (
-    FieldReading,
+    NAMES_PROMPT,
+    NAMES_VERSION,
+    NameCheck,
+    NameReading,
     PageReading,
     load_prompt,
     prompt_version,
+    to_name_check,
     to_raw,
 )
+
+_ASK_NAMES = "קרא את שם המטופל שבתקריב, לפי ההוראות."
 
 MAX_LONG_SIDE = 2576  # הגבול של Claude Sonnet 5.5 לתמונה ברזולוציה גבוהה
 MAX_IMAGE_BYTES = 4_500_000  # מתחת לתקרת 5MB לתמונה, עם מרווח
@@ -38,16 +45,113 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # מקום לחשיבה העמוקה ולתשובה. גבוה בכוונה — שהחשיבה לעולם לא תיקטע באמצע.
 MAX_OUTPUT_TOKENS = 64_000
 READ_TIMEOUT_SECONDS = 15 * 60  # לטופס אחד, כולל חשיבה
+# סינון אינטרנט (NetFree) חוסם בקשה בקוד 418 כשרצף האותיות של התמונה המקודדת יוצר במקרה
+# "מילה אסורה". אז שולחים את אותו דף בקידוד אחר — רצף אחר לגמרי. בקשה חסומה לא מגיעה
+# ל-Anthropic ולא מחויבת. הסדר: PNG רגיל, JPEG צבעוני, JPEG אפור.
+FILTER_BLOCKED = 418
+ENCODINGS = ("png", "jpeg", "jpeg_gray")
 
 _COORDS = """
-## מיקום כל שדה — `box`
+## התמונות שקיבלת, ומיקום כל ערך — `boxes`
 
-לכל שדה שנמצא: `tile` = 1, ו-`box` = `[xmin, ymin, xmax, ymax]` של **הערך עצמו**
-(לא של הכיתוב שלידו), בסקאלה 0–1000 של התמונה.
-לשדה שלא נמצא: `tile` = null, `box` = null.
+קיבלת **כמה תמונות של אותו עמוד**:
+- **תמונה 0 — העמוד המלא**, מוקטן. להתמצאות: מה איפה, איזה מסמך.
+- **תמונות 1–4 — ארבעה רבעים חופפים של העמוד, ברזולוציה מלאה** (חדים בהרבה מתמונה 0):
+  1 = למעלה מימין, 2 = למעלה משמאל, 3 = למטה מימין, 4 = למטה משמאל. הרבעים חופפים
+  בשוליים, כך שכל ערך מופיע שלם לפחות ברבע אחד.
+
+**קרא את הערכים מהרבעים החדים** — במיוחד כתב יד, שמות ומספרים בכתב יד. השתמש בתמונה 0
+רק כדי להבין את מבנה העמוד. ערך שנראה אחרת ברבע החד — הקריאה מהרבע החד קובעת.
+
+לפני כל תמונה כתוב מספרה ואת גודלה בפיקסלים. **מיקום נמדד בפיקסלים של התמונה שבה מדדת**:
+x לאורך הרוחב (0 עד הרוחב), y לאורך הגובה (0 עד הגובה). אל תשתמש בסקאלה אחרת.
+
+לכל שדה שנמצא:
+- `boxes` — רשימה, **תיבה לכל ערך** באותו סדר כמו `values`. כל תיבה היא
+  `[tile, xmin, ymin, xmax, ymax]`: `tile` = מספר התמונה (0–4) שבה הערך נראה **שלם וחד**
+  (העדף רבע חד על פני תמונה 0), והקואורדינטות בפיקסלים **של אותה תמונה**.
+- התיבה היא **סביב הדיו של הערך עצמו** — הכתב או המספר, **לא** הכיתוב שלידו ("שם:",
+  "ת.ז."), לא מדבקה מודפסת סמוכה ולא שם מודפס שמתחת לכתב היד. תיבה צמודה, עם מעט שוליים.
+- שני ערכים (למשל שני מספרים מרכזיים) = שתי תיבות, כל אחת סביב הערך שלה.
+- `tile` + `box` — תיבה אחת שמקיפה את כל הערכים של השדה, באותה תמונה (או `tile` = 0).
+
+לשדה שלא נמצא: `tile` = null, `box` = null, `boxes` = null.
 """
 
 _ASK = "קרא את טופס ההתחייבות שבתמונה והחזר את השדות בדיוק לפי ההוראות."
+
+
+# הרבעים: חפיפה בשוליים, כך שערך שיושב על קו החיתוך מופיע שלם ברבע אחד לפחות
+TILE_OVERLAP = 0.14
+TILE_NAMES = {0: "העמוד המלא", 1: "רבע למעלה מימין", 2: "רבע למעלה משמאל",
+              3: "רבע למטה מימין", 4: "רבע למטה משמאל"}
+
+
+@dataclass(frozen=True)
+class Tile:
+    number: int
+    rect: tuple[int, int, int, int]  # איפה בעמוד המקורי, בפיקסלים
+    sent: tuple[int, int]  # גודל התמונה שנשלחה, בפיקסלים
+
+
+@dataclass(frozen=True)
+class Layout:
+    """What was sent: the page size and every image cut from it."""
+
+    page: tuple[int, int]
+    tiles: tuple[Tile, ...]
+
+    def region(self, box: list[float] | None, tile: int | None) -> Region | None:
+        """One box, in pixels of the image it was measured in → a region of the page (0–1)."""
+        if box is None or len(box) != 4:
+            return None
+        part = next((t for t in self.tiles if t.number == (tile or 0)), None)
+        if part is None:
+            return None
+        try:
+            x0, y0, x1, y1 = (float(v) for v in box)
+        except (TypeError, ValueError):
+            return None
+        sw, sh = part.sent
+        inside = clamp_region((x0 / sw, y0 / sh, x1 / sw, y1 / sh))
+        if inside is None:
+            return None  # מחוץ לתמונה — לא ממציאים
+        left, top, right, bottom = part.rect
+        width, height = self.page
+        tw, th = right - left, bottom - top
+        return clamp_region((
+            (left + inside[0] * tw) / width, (top + inside[1] * th) / height,
+            (left + inside[2] * tw) / width, (top + inside[3] * th) / height,
+        ))
+
+
+def quarter_rects(width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """Four overlapping quarters, in reading order of a Hebrew page: top-right,
+    top-left, bottom-right, bottom-left."""
+    half = (1 + TILE_OVERLAP) / 2
+    xr, xl = round(width * (1 - half)), round(width * half)
+    yt, yb = round(height * half), round(height * (1 - half))
+    return [(xr, 0, width, yt), (0, 0, xl, yt), (xr, yb, width, height), (0, yb, xl, height)]
+
+
+def page_content(image_path: Path, encoding: str = "png") -> tuple[list[dict], Layout]:
+    """The whole page (for orientation) and four sharp quarters at full resolution,
+    each with a line saying which image it is and its exact size in pixels."""
+    with Image.open(image_path) as page:
+        page = page.convert("RGB")
+        width, height = page.size
+        parts = [(0, (0, 0, width, height), page)]
+        for number, rect in enumerate(quarter_rects(width, height), start=1):
+            parts.append((number, rect, page.crop(rect)))
+        content: list[dict] = []
+        tiles: list[Tile] = []
+        for number, rect, image in parts:
+            data, media_type, sent = encode_image(image, encoding)
+            content.append({"type": "text", "text": f"תמונה {number} — {TILE_NAMES[number]}: "
+                                                    f"רוחב {sent[0]} פיקסלים, גובה {sent[1]} פיקסלים."})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})
+            tiles.append(Tile(number, rect, sent))
+    return content, Layout((width, height), tuple(tiles))
 
 
 class ClaudeExtractionProvider:
@@ -71,9 +175,25 @@ class ClaudeExtractionProvider:
         )
         self._prompt = load_prompt(_COORDS)
         self.prompt_version = prompt_version(self._prompt)
+        self._names_prompt = NAMES_PROMPT
+        self.names_version = NAMES_VERSION
 
     def extract(self, image_path: Path) -> RawExtraction:
-        images = [_image_block(image_path)]
+        for encoding in ENCODINGS:
+            try:
+                return self._extract(image_path, encoding)
+            except anthropic.APIStatusError as exc:
+                if getattr(exc, "status_code", None) != FILTER_BLOCKED:
+                    message, fatal = _classify(exc)
+                    raise ExtractionError(message, fatal=fatal) from exc
+                blocked = exc  # הסינון חסם את הקידוד הזה — מנסים את הבא
+        raise ExtractionError(
+            "הבקשה נחסמה על ידי סינון האינטרנט במחשב (NetFree) — לא הגיעה ל-Claude ולא חויבה. "
+            "אפשר לבקש מ-NetFree לפתוח את api.anthropic.com."
+        ) from blocked
+
+    def _extract(self, image_path: Path, encoding: str) -> RawExtraction:
+        images, layout = page_content(image_path, encoding)
         try:
             # streaming: חשיבה עמוקה = תשובה ארוכה, וה-SDK לא מאפשר אותה בלי זרימה.
             with self._client.beta.messages.stream(
@@ -94,13 +214,11 @@ class ClaudeExtractionProvider:
             raise ExtractionError("Claude לא סיים לקרוא את הטופס בזמן. נסו שוב.") from exc
         except anthropic.APIConnectionError as exc:
             raise ExtractionError("אין חיבור ל-Anthropic. נסו שוב בעוד רגע.") from exc
-        except anthropic.APIStatusError as exc:
-            message, fatal = _classify(exc)
-            raise ExtractionError(message, fatal=fatal) from exc
 
-        return self._to_domain(response)
+        return self._to_domain(response, layout)
 
-    def _to_domain(self, response: object) -> RawExtraction:
+    def _to_domain(self, response: object, layout: Layout | None = None) -> RawExtraction:
+        layout = layout or Layout((1000, 1000), (Tile(0, (0, 0, 1000, 1000), (1000, 1000)),))
         stop = getattr(response, "stop_reason", None)
         if stop == "refusal":
             raise ExtractionError("Claude סירב לקרוא את הטופס הזה.")
@@ -120,14 +238,107 @@ class ClaudeExtractionProvider:
 
         # במקרה של מעבר למודל גיבוי — העלות והשם לפי המודל שבאמת ענה.
         served_by = getattr(response, "model", None) or self.model
-        return to_raw(parsed, served_by, _region_of, _usage(served_by, response))
+        return to_raw(parsed, served_by, layout.region, _usage(served_by, response))
+
+    # ------------------------------------------------------------ שלב שני: שמות מתוך תקריב
+    def read_names(self, crop_path: Path) -> NameCheck:
+        """Read first and last name again, from a sharp close-up of where they are.
+
+        A second, short request with its own instructions — only the close-up is
+        sent. Same model, same depth. A network-filter block is retried in another
+        encoding, like the page itself."""
+        for encoding in ENCODINGS:
+            try:
+                return self._read_names(crop_path, encoding)
+            except anthropic.APIStatusError as exc:
+                if getattr(exc, "status_code", None) != FILTER_BLOCKED:
+                    message, fatal = _classify(exc)
+                    raise ExtractionError(message, fatal=fatal) from exc
+                blocked = exc
+        raise ExtractionError("הבקשה נחסמה על ידי סינון האינטרנט במחשב (NetFree).") from blocked
+
+    def _read_names(self, crop_path: Path, encoding: str) -> NameCheck:
+        block, _ = _image_block_sized(crop_path, encoding)
+        try:
+            with self._client.beta.messages.stream(
+                model=self.model,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                system=[{"type": "text", "text": self._names_prompt, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": [block, {"type": "text", "text": _ASK_NAMES}]}],
+                output_format=NameReading,
+                output_config={"effort": self.effort},
+                betas=[FALLBACK_BETA],
+                fallbacks="default",
+            ) as stream:
+                response = stream.get_final_message()
+        except anthropic.APITimeoutError as exc:
+            raise ExtractionError("Claude לא סיים לקרוא את השם בזמן.") from exc
+        except anthropic.APIConnectionError as exc:
+            raise ExtractionError("אין חיבור ל-Anthropic.") from exc
+        if getattr(response, "stop_reason", None) in ("refusal", "max_tokens"):
+            raise ExtractionError("Claude לא השלים את קריאת השם.")
+        parsed = getattr(response, "parsed_output", None)
+        if not isinstance(parsed, NameReading):
+            text = "".join(
+                getattr(b, "text", "") for b in getattr(response, "content", []) or []
+                if getattr(b, "type", "") == "text"
+            ).strip()
+            try:
+                parsed = NameReading(**json.loads(text))
+            except Exception as exc:  # noqa: BLE001
+                raise ExtractionError("Claude החזיר תשובה במבנה לא תקין") from exc
+        served_by = getattr(response, "model", None) or self.model
+        return to_name_check(parsed, served_by, _usage(served_by, response))
 
 
-def _image_block(image_path: Path) -> dict:
-    return {
-        "type": "image",
-        "source": {"type": "base64", "media_type": "image/png", "data": page_png_b64(image_path)},
-    }
+def _image_block(image_path: Path, encoding: str = "png") -> dict:
+    return _image_block_sized(image_path, encoding)[0]
+
+
+def _image_block_sized(image_path: Path, encoding: str = "png") -> tuple[dict, tuple[int, int]]:
+    """The image block, and the exact pixel size of the image inside it — the
+    reader's positions are in those pixels."""
+    if encoding == "png":
+        data, media_type = page_png_b64(image_path), "image/png"
+    else:
+        data, media_type = page_jpeg_b64(image_path, gray=encoding == "jpeg_gray"), "image/jpeg"
+    with Image.open(io.BytesIO(base64.b64decode(data))) as sent:
+        size = sent.size
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}, size
+
+
+def encode_image(image: Image.Image, encoding: str = "png") -> tuple[str, str, tuple[int, int]]:
+    """Base64 data, media type and the exact size sent — at most 2576 px on the long
+    side and under 5MB. PNG normally; JPEG when a network filter blocked the PNG."""
+    scale = min(1.0, MAX_LONG_SIDE / max(image.size))
+    while True:
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        sized = image if size == image.size else image.resize(size, Image.Resampling.LANCZOS)
+        if encoding == "jpeg_gray":
+            sized = sized.convert("L")
+        buffer = io.BytesIO()
+        if encoding == "png":
+            sized.save(buffer, format="PNG", optimize=True)
+        else:
+            sized.save(buffer, format="JPEG", quality=92)
+        data = buffer.getvalue()
+        if len(data) <= MAX_IMAGE_BYTES or scale < 0.3:
+            media_type = "image/png" if encoding == "png" else "image/jpeg"
+            return base64.standard_b64encode(data).decode("ascii"), media_type, sized.size
+        scale *= 0.85
+
+
+def page_jpeg_b64(image_path: Path, gray: bool = False) -> str:
+    """The same page as JPEG (colour or gray), same size limit — a different byte
+    sequence, for when a network filter blocked the PNG."""
+    with Image.open(image_path) as page:
+        page = page.convert("L" if gray else "RGB")
+        scale = min(1.0, MAX_LONG_SIDE / max(page.size))
+        size = (max(1, round(page.width * scale)), max(1, round(page.height * scale)))
+        sized = page if size == page.size else page.resize(size, Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        sized.save(buffer, format="JPEG", quality=92)
+        return base64.standard_b64encode(buffer.getvalue()).decode("ascii")
 
 
 def page_png_b64(image_path: Path) -> str:
@@ -146,10 +357,10 @@ def page_png_b64(image_path: Path) -> str:
             scale *= 0.85
 
 
-def _region_of(field: FieldReading) -> Region | None:
-    if field.box is None or len(field.box) != 4:
-        return None
-    return clamp_region(tuple(v / 1000 for v in field.box))
+def _region_of(box: list[float] | None, size: tuple[int, int] = (1000, 1000)) -> Region | None:
+    """One box in pixels of a single whole-page image → a region of the page (0–1)."""
+    width, height = size
+    return Layout(size, (Tile(0, (0, 0, width, height), size),)).region(box, 0)
 
 
 def _usage(model: str, response: object) -> Usage | None:

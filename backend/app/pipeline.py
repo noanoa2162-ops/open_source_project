@@ -23,14 +23,17 @@ from pathlib import Path
 
 from PIL import Image
 
-from app.config import SETTINGS, WORK_DIR
-from app.consensus import combine
+from app.config import BATCHES_DIR, SETTINGS, WORK_DIR
+from app.consensus import NAME_KEYS, combine, merge_names
+from app.crops import crop_field
+from app.locate import check_regions, snap_to_ink
 from app.models import (
     PAGE_DONE,
     PAGE_FAILED,
     PAGE_QUEUED,
     PAGE_READING,
     PAGE_SKIPPED,
+    STATE_REVIEW,
     Batch,
     FormRecord,
     Region,
@@ -38,7 +41,7 @@ from app.models import (
 )
 from app.pages import render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
-from app.providers.reading import PROMPT_VERSION
+from app.providers.reading import PROMPT_VERSION, NameCheck, union
 from app.store import get, source_dir
 from app.validators import validate_record
 
@@ -49,6 +52,8 @@ Page = tuple[SourceFile, int, Path]
 _READ_CACHE: dict[tuple, RawExtraction] = {}
 _CACHE_LOCK = threading.Lock()
 READ_CACHE_DIR = WORK_DIR / "read_cache"
+# קריאה חוזרת של טופס שנכשל (רק אחרי אישור במסך) — אחת בכל פעם לכל טופס
+_REREAD_LOCK = threading.Lock()
 
 
 def build_reader() -> tuple[ExtractionProvider | None, str]:
@@ -218,14 +223,169 @@ def read_form(
         record.error = f"{reader.model}: {exc}"
         for field in record.fields.values():
             field.flag("missing")
+        log_failure(batch_id, source, page_number, exc)
         return record
 
     record.seconds = round(time.perf_counter() - started, 1)
     usage = reading.usage
     record.cost_usd = usage.cost_usd if usage and usage.cost_usd is not None else 0.0
     combine(record, reading)
+    check_regions(record, image_path)  # מיקומי התיבות מול העמוד עצמו — מקומי, בלי עלות
+    snap_to_ink(record, image_path)  # תיבות של כתב יד — נצמדות לדיו הכחול שבטופס
+    # קריאה שנייה של השם מתקריב — כבויה (18/10/2026, החלטת נועה): עלתה 3–6¢ לטופס ובמדידה
+    # על 3 טפסים שיפרה אחד, לא שינתה אחד והחמירה אחד. הפונקציה נשארת: look_again_at_names.
     validate_record(record)
     return record
+
+
+# ------------------------------------------------------------ שלב שני: השם מתוך תקריב חד
+NAME_TALL = 0.30  # תיבת שמות גבוהה מזה (השמות רחוקים זה מזה) — חותכים רק את השם הכתום
+
+
+def name_region(record: FormRecord) -> Region | None:
+    """Where to cut the close-up: around both names when they sit together,
+    otherwise around the one that needs review."""
+    first, last = (record.fields[k].region for k in NAME_KEYS)
+    both = union([first, last])
+    if both and both[3] - both[1] <= NAME_TALL:
+        return both
+    for key in NAME_KEYS:
+        field = record.fields[key]
+        if field.region and field.state == STATE_REVIEW:
+            return field.region
+    return None
+
+
+def name_crop(page_png: Path, region: Region, target: Path) -> Path:
+    """A sharp, generous close-up from the full-resolution page: the name, its
+    label ("שם", "שם משפחה") and the sticker around it."""
+    x0, y0, x1, y1 = region
+    dx = max((x1 - x0) * 0.5, 0.06)
+    dy = max((y1 - y0) * 1.5, 0.025)
+    wide = (max(0.0, x0 - dx), max(0.0, y0 - dy), min(1.0, x1 + dx), min(1.0, y1 + dy))
+    target.unlink(missing_ok=True)  # תקריב חדש לכל קריאה — המיקום עשוי להשתנות
+    return crop_field(page_png, wide, target)
+
+
+def look_again_at_names(
+    provider: ExtractionProvider, record: FormRecord, image_path: Path,
+    batch_id: str, source: SourceFile, page_number: int,
+) -> None:
+    """When a name is orange, read it again from a close-up — wherever on the page
+    it is. Costs one short reading; a failure here never loses the first reading."""
+    if not hasattr(provider, "read_names"):
+        return
+    if not any(record.fields[k].state == STATE_REVIEW for k in NAME_KEYS):
+        return
+    region = name_region(record)
+    if region is None:
+        return
+    try:
+        crop = name_crop(image_path, region, crop_path(batch_id, source.index, page_number, "names-check"))
+        check = _read_names_saved(provider, crop)
+    except ExtractionError as exc:
+        log_failure(batch_id, source, page_number, exc)
+        return
+    except Exception:  # noqa: BLE001 - הקריאה הראשונה נשארת
+        traceback.print_exc()
+        return
+    if check.usage and check.usage.cost_usd:
+        record.cost_usd = (record.cost_usd or 0.0) + check.usage.cost_usd
+    merge_names(record, check)
+
+
+def _read_names_saved(provider: ExtractionProvider, crop: Path) -> NameCheck:
+    """The close-up reading — from the saved answers when this exact close-up was
+    already read with the same model and instructions."""
+    key = ("names", _page_digest(crop), provider.model, getattr(provider, "names_version", ""))
+    path = _saved_path(key)
+    if path.is_file():
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if saved.get("key") == list(key):
+                data = {k: v for k, v in saved["reading"].items() if k != "usage"}
+                return NameCheck(**data)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    check = provider.read_names(crop)
+    try:
+        data = dataclasses.asdict(check)
+        data["usage"] = None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f"{path.stem}.{threading.get_ident()}.tmp")
+        temp.write_text(json.dumps({"key": list(key), "reading": data}, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+    except (OSError, TypeError, ValueError):
+        traceback.print_exc()
+    return check
+
+
+def log_failure(batch_id: str, source: SourceFile, page_number: int, exc: BaseException) -> None:
+    """One line per failed form — when, which page, what went wrong. No form content."""
+    cause = exc.__cause__
+    detail = f"{type(cause).__name__}: {getattr(cause, 'status_code', '') or ''}" if cause else ""
+    line = (f"{time.strftime('%Y-%m-%d %H:%M:%S')}\tקובץ {source.index} עמוד {page_number}\t"
+            f"{exc}\t{detail}".rstrip() + "\n")
+    print(f"[{batch_id}] הקריאה נכשלה — {line}", end="", flush=True)
+    try:
+        path = BATCHES_DIR / batch_id / "errors.log"
+        if not path.parent.is_dir():
+            return  # רק לתיקייה של העלאה אמיתית — לא יוצרים תיקיות חדשות
+        with path.open("a", encoding="utf-8") as log:
+            log.write(line)
+    except OSError:
+        pass
+
+
+class RereadRefused(Exception):
+    """A second reading was not started; the message says why, in Hebrew."""
+
+
+def reread(batch_id: str, record_id: str) -> None:
+    """Read one failed form again — only after the person confirmed it (it costs
+    a reading). Runs in the background; the page shows "reading" until it ends."""
+    batch = get(batch_id)
+    if batch is None:
+        raise RereadRefused("האצווה לא נמצאה.")
+    with _REREAD_LOCK:
+        if batch.status in ("queued", "processing"):
+            raise RereadRefused("הקריאה של הקובץ עוד לא הסתיימה.")
+        index = next((i for i, r in enumerate(batch.records) if r.record_id == record_id), None)
+        if index is None:
+            raise RereadRefused("הטופס לא נמצא.")
+        old = batch.records[index]
+        if not old.error:
+            raise RereadRefused("הטופס הזה כבר נקרא.")
+        page = next((p for p in batch.pages if p.get("record_id") == record_id), None)
+        if page is not None and page.get("status") == PAGE_READING:
+            raise RereadRefused("הטופס כבר נקרא שוב ברגע זה.")
+        if page is not None:
+            page["status"] = PAGE_READING
+        old.error = "קורא שוב…"
+    threading.Thread(target=_reread_run, args=(batch, index, old, page), daemon=True).start()
+
+
+def _reread_run(batch: Batch, index: int, old: FormRecord, page: dict | None) -> None:
+    record = None
+    try:
+        provider, problem = build_reader()
+        source = next(s for s in batch.sources if s.index == old.source_index)
+        if provider is None:
+            raise ExtractionError(problem or "אין מודל זמין לקריאה.")
+        image_path = page_image_path(batch.batch_id, old.source_index, old.page_number)
+        record = read_form(Reader(provider), image_path, batch.batch_id, source, old.page_number)
+        if record.upside_down:
+            show_upright(record, image_path)
+        record.record_id = old.record_id  # אותו טופס — המסך ממשיך לזהות אותו
+    except Exception as exc:  # noqa: BLE001 - חוט רקע לא מת בשקט
+        traceback.print_exc()
+        old.error = f"הקריאה החוזרת נכשלה: {exc}"
+    with _REREAD_LOCK:
+        if record is not None:
+            batch.records[index] = record
+        if page is not None:
+            failed = record is None or bool(record.error)
+            page["status"] = PAGE_FAILED if failed else PAGE_DONE
 
 
 def show_upright(record: FormRecord, image_path: Path) -> None:
