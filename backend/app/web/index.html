@@ -59,7 +59,7 @@
 
   <div class="pagehead">
     <h1 id="pageTitle">קליטת טפסי התחייבות</h1>
-    <p>מעלים טפסים, בודקים, מייצאים לאקסל.</p>
+    <p id="pageSub">מעלים טפסים, בודקים, מייצאים לאקסל.</p>
   </div>
 
   <div id="notices"></div>
@@ -223,14 +223,11 @@
 
   <!-- אזור: כל הרשומות השמורות במערכת — חיפוש, סינון, מה אושר ומה ממתין -->
   <section id="recordsView" class="strip hidden" aria-labelledby="recTitle">
-    <div class="rechead">
-      <h2 id="recTitle">רשומות במערכת</h2>
-      <p class="sub">כל טופס שנקלט נשמר כאן — גם אחרי סגירת הדפדפן. לחיצה על שורה פותחת אותו לבדיקה.</p>
-    </div>
+    <h2 class="sr-only" id="recTitle">רשומות במערכת</h2>
     <div class="filterbar card" role="search" aria-label="חיפוש וסינון רשומות">
       <div class="float">
         <input id="recQ" type="search" placeholder=" " autocomplete="off">
-        <label for="recQ">חיפוש: שם, ת״ז, מספר מרכזי או התחייבות</label>
+        <label for="recQ">חיפוש: שם, ת״ז או מספר</label>
       </div>
       <div class="float">
         <select id="recSender" aria-label="סינון לפי גורם שולח"><option value="">כל הגורמים</option></select>

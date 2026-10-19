@@ -124,12 +124,14 @@
       hiddenByUs = MAIN.filter(function(s){ return !$(s).classList.contains('hidden'); });
       hiddenByUs.forEach(function(s){ $(s).classList.add('hidden'); });
       $('#pageTitle').textContent = 'רשומות במערכת';
+      $('#pageSub').textContent = 'כל טופס שנקלט נשמר כאן, גם אחרי סגירת הדפדפן. לחיצה על שורה פותחת אותו לבדיקה.';
       refresh();
       $('#recQ').focus();
     } else {
       hiddenByUs.forEach(function(s){ $(s).classList.remove('hidden'); });
       hiddenByUs = [];
       $('#pageTitle').textContent = 'קליטת טפסי התחייבות';
+      $('#pageSub').textContent = 'מעלים טפסים, בודקים, מייצאים לאקסל.';
     }
   }
   $('#navRecords').addEventListener('click', function(){ show(!open); });
