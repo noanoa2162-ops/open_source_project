@@ -8,16 +8,16 @@ Build a Hebrew RTL hackathon demo: scanned/photographed commitment forms → rev
 - Hebrew extraction is the model-selection gate: printed Hebrew, handwritten names, stamps, RTL and exact digit strings. Do not equate Hebrew conversation skill with document-reading accuracy. No multilingual benchmark substitutes for sample evaluation.
 - Only organizer-provided altered samples may reach external AI in the demo. No claim of production readiness or guaranteed accuracy.
 
-## Stack
-- Frontend: React, TypeScript, Vite, MUI, TanStack Query; Hebrew RTL.
+## Stack (as built — decisions updated 19/10/2026; the original plan is in INSTRUCTIONS.md §4)
+- Frontend: plain JavaScript + CSS served by FastAPI, no build step; Hebrew RTL. (React/MUI was planned; dropped for time — one page, no bundle, nothing to deploy separately.)
 - Backend: Python, FastAPI, Pydantic, uv (`pyproject.toml` + committed `uv.lock`).
-- Data: PostgreSQL, SQLAlchemy, Alembic. Files in private storage behind a storage interface.
-- PDF/images: pypdfium2, Pillow. Excel: openpyxl.
-- Docker Compose: frontend, API, worker, database; API/worker share one Python codebase.
-- Jupyter notebook in VS Code for evaluation only; import the same extraction modules used by the server.
-- Develop in local VS Code with Git; cloud sandbox is optional if local setup blocks progress. Deploy a thin slice early. Cloud processing is not inherently private; temporary storage is not persistent.
-- Primary approach: vision model directly reads original page images. No separate OCR dependency in the initial pipeline. Optional OCR adapter only after measured benefit.
-- Provider/model IDs are configuration, not business logic. Gemini vision is the initial candidate; actual available model and final choice require sample evaluation. Do not silently substitute a provider.
+- Data: SQLite (WAL) through `db.py` only — every batch, record and edit; the challenge names SQLite as acceptable. Moving to PostgreSQL = changing `db.py`. Files on disk under `DATA_DIR`.
+- PDF/images: pypdfium2, Pillow. Excel: openpyxl. Tesseract only for page orientation.
+- One Docker container (Dockerfile + render.yaml, persistent disk at `/data`); reading runs in background threads of the same process, state persisted to SQLite, unfinished batches resume on restart.
+- Evaluation: `uv run evaluate` (script, no notebook) imports the same extraction modules as the server.
+- Develop in local VS Code with Git. Cloud processing is not inherently private; temporary storage is not persistent.
+- Primary approach: vision model directly reads original page images. No separate OCR for reading.
+- Provider/model IDs are configuration (`READER_MODEL`, `READER_EFFORT`), not business logic. Current reader: Claude Opus 5.5 (chosen 15–16/10/2026 after Noa compared it with Gemini/Sonnet on the samples); the final setting is chosen by `uv run evaluate` on the verified truth table. Do not silently substitute a provider.
 
 ## Non-negotiable architecture
 - Flow: validate upload → create durable job → split/render pages → identify/group forms → extract → normalize/validate → human review → Excel.
