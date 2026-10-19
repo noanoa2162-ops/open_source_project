@@ -43,6 +43,7 @@
       <button class="pill on" id="navUpload" aria-current="page">קליטת טפסים</button>
       <button class="pill" id="navReview" disabled>טפסים לבדיקה <b id="navReviewN"></b></button>
       <button class="pill" id="navExport" disabled>ייצוא לאקסל</button>
+      <button class="pill" id="navRecords">רשומות במערכת <b id="navRecordsN"></b></button>
     </nav>
   </div>
 </header>
@@ -217,6 +218,53 @@
       </div>
     </div>
   </section>
+
+  <!-- אזור: כל הרשומות השמורות במערכת — חיפוש, סינון, מה אושר ומה ממתין -->
+  <section id="recordsView" class="strip hidden" aria-labelledby="recTitle">
+    <div class="rechead">
+      <h2 id="recTitle">רשומות במערכת</h2>
+      <p class="sub">כל טופס שנקלט נשמר כאן — גם אחרי סגירת הדפדפן. לחיצה על שורה פותחת אותו לבדיקה.</p>
+    </div>
+    <div class="filterbar card" role="search" aria-label="חיפוש וסינון רשומות">
+      <div class="float">
+        <input id="recQ" type="search" placeholder=" " autocomplete="off">
+        <label for="recQ">חיפוש: שם, ת״ז, מספר מרכזי או התחייבות</label>
+      </div>
+      <div class="float">
+        <select id="recSender" aria-label="סינון לפי גורם שולח"><option value="">כל הגורמים</option></select>
+        <label for="recSender" class="up">גורם שולח</label>
+      </div>
+      <div class="float datef">
+        <input id="recFrom" type="date" aria-label="תאריך קבלה — מ">
+        <label for="recFrom" class="up">התקבל מ־</label>
+      </div>
+      <div class="float datef">
+        <input id="recTo" type="date" aria-label="תאריך קבלה — עד">
+        <label for="recTo" class="up">עד</label>
+      </div>
+      <div class="statuses" role="group" aria-label="סינון לפי מצב" id="recStatuses">
+        <button data-status="" class="on" aria-pressed="true">הכול <b data-n="all">0</b></button>
+        <button data-status="review" aria-pressed="false">לבדיקה <b data-n="review">0</b></button>
+        <button data-status="ready" aria-pressed="false">ממתין לאישור <b data-n="ready">0</b></button>
+        <button data-status="approved" aria-pressed="false">מאושר <b data-n="approved">0</b></button>
+        <button data-status="failed" aria-pressed="false">נכשל <b data-n="failed">0</b></button>
+      </div>
+      <span class="grow"></span>
+      <div class="exports" role="group" aria-label="ייצוא הרשומות המסוננות">
+        <a class="secondary btnlink" id="recXlsx" href="#">⬇ Excel</a>
+        <a class="secondary btnlink" id="recCsv" href="#">CSV</a>
+        <a class="secondary btnlink" id="recJson" href="#">JSON</a>
+      </div>
+    </div>
+    <p class="recsum" id="recSum" aria-live="polite"></p>
+    <div class="card tablewrap">
+      <table class="rectable">
+        <thead><tr id="recHead"></tr></thead>
+        <tbody id="recBody"></tbody>
+      </table>
+      <div class="empty-filter hidden" id="recEmpty"></div>
+    </div>
+  </section>
 </main>
 
 <footer class="sitefoot">
@@ -347,5 +395,6 @@
 <div id="party" class="party hidden" aria-hidden="true"></div>
 
 <script src="/static/app.js?v={{v}}"></script>
+<script src="/static/records.js?v={{v}}"></script>
 </body>
 </html>

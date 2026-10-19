@@ -609,3 +609,34 @@ html[data-theme="dark"] .closebtn{background:rgba(255,255,255,.1)}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
+/* ------------------------------------------------------------ מסך "רשומות במערכת" */
+.rechead{margin:.4rem 0 1rem}
+.rechead h2{font-size:1.45rem;margin:0 0 .25rem}
+.rechead .sub{margin:0;color:var(--muted)}
+.float.datef{min-width:9.5rem;flex:0 1 11rem}
+.exports{display:inline-flex;gap:.4rem;flex-wrap:wrap}
+.btnlink{display:inline-flex;align-items:center;min-height:2.3rem;padding:.2rem .95rem;border:1px solid var(--line-2);
+  border-radius:8px;color:var(--ink);text-decoration:none;font-weight:600;background:var(--card)}
+.btnlink:hover{border-color:var(--primary);color:var(--primary)}
+.btnlink:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+.recsum{margin:-.4rem 0 .8rem;color:var(--muted);font-size:.95rem}
+.rectable{width:100%;border-collapse:collapse}
+.rectable th{text-align:start;font-size:.86rem;color:var(--muted);font-weight:600;padding:.75rem .7rem;border-bottom:1px solid var(--line)}
+.rectable td{padding:.7rem;border-bottom:1px solid var(--line);vertical-align:top;font-variant-numeric:tabular-nums}
+.rectable tbody tr{cursor:pointer;transition:background .12s}
+.rectable tbody tr:hover,.rectable tbody tr:focus{background:var(--primary-soft);outline:0}
+.rectable tbody tr:focus-visible{box-shadow:inset 3px 0 0 var(--primary)}
+.rectable .num{display:block;white-space:nowrap}
+.rectable .none{color:var(--muted)}
+.rectable .src,.rectable .when{color:var(--muted);font-size:.86rem;white-space:nowrap}
+.rectable tr.st-review td:first-child{box-shadow:inset 4px 0 0 var(--amber)}
+.rectable tr.st-approved td:first-child{box-shadow:inset 4px 0 0 var(--ok)}
+.badge.dup{background:#efe7fb;color:#5b2d9a}
+
+/* ------------------------------------------------------------ כניסה בקוד גישה */
+.loginpage{min-height:100vh;display:grid;place-items:center;background:var(--bg,#f3f6fa)}
+.loginbox{max-width:24rem;width:calc(100% - 2rem);padding:2rem}
+.loginbox h1{font-size:1.4rem;margin:0 0 .5rem}
+.loginbox form{display:grid;gap:.6rem;margin-top:1rem}
+.loginbox input{font:inherit;padding:.7rem;border:1px solid #9aa9b8;border-radius:8px}
+.loginerr{color:#a3271b;margin:0}

@@ -465,16 +465,36 @@ def test_holdout_is_deterministic_and_about_a_third():
 # ------------------------------------------------------------- evaluate
 
 
-def test_evaluation_counts_a_silent_error(tmp_path):
-    from app.evaluate import Config, Score, score_form
+def test_evaluation_counts_a_silent_error(tmp_path, monkeypatch):
+    from app.evaluate import Config, run_config
 
     form = gold.GoldForm("k", png(tmp_path / "p.png"), "f.pdf", 1, "", {"commitment_numbers": ["730578626"]}, False)
     wrong = Judge("a", reading("a", commitment_numbers=["87250"]))
-    cfg = Config("X", "test", lambda: wrong, 0)
-    score = Score()
-    score_form(cfg, form, score, [])
-    assert score.silent_errors == 1, "ערך שגוי בלי כתום — זה בדיוק מה שנמדד"
-    assert score.errors[0]["field"] == "commitment_numbers"
+    monkeypatch.setattr(Config, "make", lambda self: wrong)
+    dev, hold, details = run_config(Config("x", "test", "high"), [form], parallel=1)
+    assert dev.fields["commitment_numbers"].silent == 1, "ערך שגוי בלי כתום — זה בדיוק מה שנמדד"
+    assert dev.errors[0]["field"] == "commitment_numbers"
+
+
+def test_ambiguous_field_counts_orange_as_right_and_never_as_silent_error(tmp_path, monkeypatch):
+    from app.evaluate import Config, run_config
+
+    form = gold.GoldForm("k", png(tmp_path / "p.png"), "f.pdf", 1, "",
+                         {"commitment_numbers": ["1?001"]}, False, ambiguous=("commitment_numbers",))
+    sure = Judge("a", reading("a", commitment_numbers=["14001"]))
+    monkeypatch.setattr(Config, "make", lambda self: sure)
+    dev, _, _ = run_config(Config("x", "test", "high"), [form], parallel=1)
+    field = dev.fields["commitment_numbers"]
+    assert field.silent == 0 and field.ambiguous_unflagged + field.ambiguous_flagged == 1
+
+
+def test_config_codes_map_to_model_and_effort():
+    from app.evaluate import parse_config
+
+    assert (parse_config("sonnet-medium").model, parse_config("sonnet-medium").effort) == ("claude-sonnet-5-5", "medium")
+    assert parse_config("haiku-high").model == "claude-haiku-5-5"
+    with pytest.raises(ValueError):
+        parse_config("gpt-high")
 
 
 # --------------------------------------------------------- Gemini quotas

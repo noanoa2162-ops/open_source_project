@@ -53,7 +53,10 @@ fetch('/api/config').then(function(r){ return r.json(); }).then(function(c){
   }).join('') + '<th scope="col"><span class="sr-only">אישור</span></th>';
   $('#fvCards').style.setProperty('--n', FIELDS.length);
   if (!c.has_key) notice('err', 'אין מפתח API', 'לא נמצא ANTHROPIC_API_KEY בקובץ .env. הוסיפו והפעילו מחדש את השרת.');
-  if (load('toured', '') !== '1') openTour();
+  // רענון הדף לא מאבד עבודה: חוזרים לקליטה האחרונה, בדיוק כפי שנשמרה במערכת
+  const saved = new URLSearchParams(location.search).get('batch') || load('batch', '');
+  if (saved) openSavedBatch(saved);
+  else if (load('toured', '') !== '1') openTour();
 });
 
 /* ------------------------------------------------------------ מיתוג */
@@ -110,7 +113,8 @@ function cropUrl(r, key, i){
 }
 // כשיש כמה ערכים עם מיקום לכל אחד (למשל שני מספרים מרכזיים) — תקריב לכל ערך
 function perValue(f){ return f && f.crop_boxes && f.crop_boxes.length > 1 ? f.crop_boxes : null; }
-function isApproved(r){ return r.verified || FIELDS.every(function(f){ return r.fields[f.key].state === 'approved'; }); }
+// "מאושר" = הטופס כולו אושר ("אישור הטופס") — אותו כלל כמו בייצוא ובמסך הרשומות
+function isApproved(r){ return !!r.verified; }
 function senderOf(r){ return (r.fields.sending_entity.values[0] || '').trim(); }
 function valueHtml(f){
   if (f.values.length) return markUnreadable(f.values.join(' | '));
@@ -122,9 +126,17 @@ function firstValue(r, key){ return (r.fields[key] && r.fields[key].values[0]) |
 // תג מצב בצורת "שירות מקוון" של gov.il. ירוק רק כשאדם אישר.
 function statusBadge(r){
   if (r.error) return '<span class="badge fail">✗ הקריאה נכשלה</span>';
-  if (isApproved(r)) return '<span class="badge ok">✓ ' + (r.verified ? 'מאומת' : 'מאושר') + '</span>';
-  if (r.review_count) return '<span class="badge review"><b>' + r.review_count + '</b> לבדיקה</span>';
-  return '<span class="badge ready">מוכן לאישור</span>';
+  if (isApproved(r)) return '<span class="badge ok">✓ מאושר</span>';
+  const dup = r.duplicates && r.duplicates.length
+    ? ' <span class="badge dup" title="' + esc(dupText(r)) + '">⧉ ייתכן כפול</span>' : '';
+  if (r.review_count) return '<span class="badge review"><b>' + r.review_count + '</b> לבדיקה</span>' + dup;
+  return '<span class="badge ready">מוכן לאישור</span>' + dup;
+}
+// אותו מספר התחייבות / מרכזי כבר נקלט בטופס אחר — לבדיקה, לא מיזוג אוטומטי
+function dupText(r){
+  return (r.duplicates || []).map(function(d){
+    return 'אותו מספר (' + d.matches.join(', ') + ') גם ב-' + d.source_name + ' עמוד ' + d.page_number;
+  }).join(' · ');
 }
 
 /* ------------------------------------------------------------ הודעות */
@@ -206,8 +218,35 @@ async function upload(fileList){
   }
 }
 
+/* פתיחת אצווה שכבר שמורה במערכת — ממסך "רשומות", או אחרי רענון הדף. בלי אנימציית קליטה. */
+async function openSavedBatch(batchId, recordId){
+  const res = await fetch('/api/batches/' + encodeURIComponent(batchId));
+  if (!res.ok) { save('batch', ''); return false; }
+  const d = await res.json();
+  clearNotices();
+  if (['queued', 'processing'].indexOf(d.status) !== -1) {
+    showProgress('קולט את הטפסים…', (d.sources || []).map(function(s){ return s.filename; }));
+    begin({ batch_id: d.batch_id });
+    return true;
+  }
+  clearInterval(timer);
+  batch = d.batch_id;
+  save('batch', batch);
+  processing = false; finishing = false; celebrated = false;
+  formIndex = 0; cardIndex = 0; lastSignature = '';
+  drop.classList.add('hidden');
+  $('#progress').classList.add('hidden');
+  (d.warnings || []).forEach(function(w){ notice('warn', 'לתשומת לב', w); });
+  if (view === 'form') view = 'tiles';
+  render(d, true);
+  if (recordId && recordById(recordId)) openRecord(recordId);
+  return true;
+}
+window.TL = { openSavedBatch: openSavedBatch, esc: esc, toast: function(t){ toast(t); } };
+
 function begin(info){
   batch = info.batch_id;
+  save('batch', batch);
   last = null;
   finishing = false;
   view = 'tiles';
@@ -1623,9 +1662,18 @@ function splitValues(text){
 
 /* ------------------------------------------------------------ פעולות מול השרת */
 async function patch(recordId, body){
+  const rec = recordById(recordId);
+  if (rec && rec.revision != null) body = Object.assign({ revision: rec.revision }, body);
   const res = await fetch('/api/records/' + recordId, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
   });
+  if (res.status === 409) {
+    // הטופס השתנה בחלון אחר: מרעננים מהמערכת ולא דורסים
+    toast('הטופס השתנה בחלון אחר — המסך רוענן. נסו שוב.');
+    const fresh = await fetch('/api/batches/' + batch);
+    if (fresh.ok) render(await fresh.json(), true);
+    return null;
+  }
   if (!res.ok) { toast('הפעולה לא נשמרה — נסו שוב'); return null; }
   return res.json();
 }
@@ -1840,6 +1888,7 @@ $('#again').onclick = function(){ startNewIntake($('#again')); };
 function resetToUpload(){
   clearInterval(timer);
   batch = null;
+  save('batch', '');
   last = null;
   processing = false;
   finishing = false;

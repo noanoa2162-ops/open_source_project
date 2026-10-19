@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 serve = "app.main:run"
 evaluate = "app.evaluate:main"
+gold-draft = "app.gold_draft:main"
 
 [dependency-groups]
 dev = ["pytest>=8.3"]
