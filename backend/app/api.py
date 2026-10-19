@@ -38,6 +38,11 @@ app = FastAPI(title="טופס למידע", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+@app.get("/healthz")
+def health() -> dict:
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     # גרסה לפי זמן השינוי של הקבצים — הדפדפן לא יציג CSS/JS ישנים אחרי עדכון.

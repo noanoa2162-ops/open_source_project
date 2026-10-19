@@ -1007,6 +1007,7 @@ def test_build_reader_is_the_configured_claude_model(monkeypatch):
     from app.providers.claude_vision import ClaudeExtractionProvider
 
     monkeypatch.setattr(pipeline, "SETTINGS", _settings(reader_model="claude-opus-5-5", anthropic_api_key="k"))
+    monkeypatch.setattr("app.providers.claude_vision.SETTINGS", pipeline.SETTINGS)
     reader, problem = pipeline.build_reader()
     assert problem == "" and isinstance(reader, ClaudeExtractionProvider)
     assert reader.model == "claude-opus-5-5"
