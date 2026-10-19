@@ -156,3 +156,44 @@ def workbook_bytes(batch: Batch) -> bytes:
     buffer = BytesIO()
     build_workbook(batch).save(buffer)
     return buffer.getvalue()
+
+
+RECORD_STATUS = {"approved": "מאושר", "ready": "ממתין לאישור", "review": "לבדיקה", "failed": "הקריאה נכשלה"}
+
+
+def records_workbook_bytes(rows: list[dict]) -> bytes:
+    """The records screen as it is filtered: one row per commitment number, like
+    the batch export, plus status and source. Everything as neutralised text."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "רשומות"
+    ws.sheet_view.rightToLeft = True
+    head = [f.label_he for f in FIELDS] + ["מצב", "קובץ מקור", "עמוד בקובץ"]
+    widths = [14, 16, 16, 18, 20, 22, 20, 16, 30, 12]
+    for index, (label, width) in enumerate(zip(head, widths), start=1):
+        cell = ws.cell(row=1, column=index, value=label)
+        cell.fill = PatternFill("solid", fgColor=NAVY)
+        cell.font = Font(bold=True, color="FFFFFF", size=11)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(index)].width = width
+    ws.freeze_panes = "A2"
+    thin = Side(style="thin", color=LINE)
+    line = 1
+    for row in rows:
+        base = [MULTI_SEPARATOR.join(row[f.key]) if f.multi else row[f.key] for f in FIELDS]
+        extra = [RECORD_STATUS.get(row["status"], row["status"]), row["source_name"], str(row["page_number"])]
+        commitments = row[COMMITMENT_KEY] or [""]
+        column = next(i for i, f in enumerate(FIELDS) if f.key == COMMITMENT_KEY)
+        for number in commitments:
+            line += 1
+            values = [*base[:column], number, *base[column + 1:], *extra]
+            for col, value in enumerate(values, start=1):
+                cell = ws.cell(row=line, column=col, value=neutralize(str(value)))
+                cell.number_format = "@"
+                cell.alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
+                cell.border = Border(bottom=thin)
+                if row["status"] in ("review", "failed") and col <= len(FIELDS):
+                    cell.fill = PatternFill("solid", fgColor=AMBER_FILL)
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

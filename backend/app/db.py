@@ -11,6 +11,7 @@ same page again (after a fix) updates its row — never a duplicate.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -21,7 +22,7 @@ from pathlib import Path
 from PIL import Image
 
 from app.config import WORK_DIR
-from app.models import FormRecord, SourceFile, now
+from app.models import Batch, ExtractedField, FormRecord, SourceFile, now
 
 DB_PATH = WORK_DIR / "forms.db"
 PAGES_DIR = WORK_DIR / "approved_pages"
@@ -51,12 +52,52 @@ CREATE TABLE IF NOT EXISTS approved_forms (
 """
 
 
+# כל ההעלאות וכל הרשומות — לא רק המאושרות. האצווה כולה נשמרת כ-JSON (מקור האמת לטעינה
+# מחדש), והרשומות גם כשורות עם עמודות לחיפוש ולסינון במסך "רשומות".
+_SCHEMA_RECORDS = (
+    """CREATE TABLE IF NOT EXISTS batches (
+        batch_id     TEXT PRIMARY KEY,
+        session_id   TEXT NOT NULL DEFAULT '',
+        status       TEXT,
+        display_name TEXT,
+        created_at   TEXT,
+        updated_at   TEXT,
+        data         TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS records (
+        record_id            TEXT PRIMARY KEY,
+        batch_id             TEXT NOT NULL,
+        session_id           TEXT NOT NULL DEFAULT '',
+        status               TEXT,
+        first_name           TEXT,
+        last_name            TEXT,
+        national_id          TEXT,
+        central_numbers      TEXT,
+        sample_received_date TEXT,
+        received_iso         TEXT,
+        sending_entity       TEXT,
+        commitment_numbers   TEXT,
+        review_count         INTEGER,
+        source_name          TEXT,
+        page_number          INTEGER,
+        revision             INTEGER,
+        created_at           TEXT,
+        updated_at           TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS records_session ON records(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS records_batch ON records(batch_id)",
+)
+
+
 def _connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_SCHEMA)
+    for statement in _SCHEMA_RECORDS:
+        conn.execute(statement)
     return conn
 
 
@@ -107,3 +148,188 @@ def list_approved(path: Path | None = None) -> list[dict]:
             item[k] = json.loads(item[k] or "[]")
         out.append(item)
     return out
+
+
+# ------------------------------------------------------------ כל ההעלאות והרשומות
+def _batch_to_json(batch: Batch) -> str:
+    return json.dumps(dataclasses.asdict(batch), ensure_ascii=False)
+
+
+def _region(value) -> tuple | None:
+    return tuple(value) if value else None
+
+
+def _batch_from_json(text: str) -> Batch:
+    data = json.loads(text)
+    known = {f.name for f in dataclasses.fields(Batch)}
+    record_fields = {f.name for f in dataclasses.fields(FormRecord)}
+    field_fields = {f.name for f in dataclasses.fields(ExtractedField)}
+    sources = [SourceFile(**s) for s in data.pop("sources", [])]
+    records = []
+    for raw in data.pop("records", []):
+        fields = {}
+        for key, f in (raw.pop("fields", {}) or {}).items():
+            f = {k: v for k, v in f.items() if k in field_fields}
+            f["region"] = _region(f.get("region"))
+            f["value_regions"] = [_region(r) for r in f.get("value_regions") or []]
+            fields[key] = ExtractedField(**f)
+        records.append(FormRecord(**{k: v for k, v in raw.items() if k in record_fields}, fields=fields))
+    return Batch(**{k: v for k, v in data.items() if k in known}, sources=sources, records=records)
+
+
+def _received_iso(values: list[str]) -> str:
+    """DD/MM/YYYY → YYYY-MM-DD, for date-range filtering. Empty when unclear."""
+    for value in values:
+        parts = value.split("/")
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+    return ""
+
+
+def _record_row(record: FormRecord, session_id: str) -> dict:
+    values = {k: f.values for k, f in record.fields.items()}
+    return {
+        "record_id": record.record_id,
+        "batch_id": record.batch_id,
+        "session_id": session_id,
+        "status": record.status,
+        **{k: " | ".join(values.get(k, [])) for k in TEXT_FIELDS},
+        **{k: json.dumps(values.get(k, []), ensure_ascii=False) for k in LIST_FIELDS},
+        "received_iso": _received_iso(values.get("sample_received_date", [])),
+        "review_count": record.review_count,
+        "source_name": record.source_name,
+        "page_number": record.page_number,
+        "revision": record.revision,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+def save_batch(batch: Batch, path: Path | None = None) -> None:
+    """Write the whole batch and every one of its records. Idempotent: running it
+    again replaces the rows — a retry never duplicates a record."""
+    rows = [_record_row(r, batch.session_id) for r in batch.records]
+    with _LOCK, _connect(path) as conn:
+        conn.execute(
+            "INSERT INTO batches (batch_id, session_id, status, display_name, created_at, updated_at, data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id) DO UPDATE SET "
+            "status = excluded.status, display_name = excluded.display_name, "
+            "updated_at = excluded.updated_at, data = excluded.data",
+            (batch.batch_id, batch.session_id, batch.status, batch.display_name,
+             batch.created_at, now(), _batch_to_json(batch)),
+        )
+        keep = [r["record_id"] for r in rows]
+        if keep:
+            marks = ",".join("?" * len(keep))
+            conn.execute(f"DELETE FROM records WHERE batch_id = ? AND record_id NOT IN ({marks})",
+                         (batch.batch_id, *keep))
+        else:
+            conn.execute("DELETE FROM records WHERE batch_id = ?", (batch.batch_id,))
+        for row in rows:
+            columns = ", ".join(row)
+            marks = ", ".join(":" + c for c in row)
+            updates = ", ".join(f"{c} = excluded.{c}" for c in row if c not in ("record_id", "created_at"))
+            conn.execute(f"INSERT INTO records ({columns}) VALUES ({marks}) "
+                         f"ON CONFLICT(record_id) DO UPDATE SET {updates}", row)
+
+
+def load_batches(path: Path | None = None) -> list[Batch]:
+    """Every saved batch, oldest first. A damaged row is skipped, never fatal."""
+    with _LOCK, _connect(path) as conn:
+        rows = conn.execute("SELECT data FROM batches ORDER BY created_at").fetchall()
+    batches = []
+    for row in rows:
+        try:
+            batches.append(_batch_from_json(row["data"]))
+        except (ValueError, TypeError, KeyError):
+            continue
+    return batches
+
+
+def delete_batch(batch_id: str, path: Path | None = None) -> None:
+    with _LOCK, _connect(path) as conn:
+        conn.execute("DELETE FROM records WHERE batch_id = ?", (batch_id,))
+        conn.execute("DELETE FROM batches WHERE batch_id = ?", (batch_id,))
+
+
+def search_records(
+    session_id: str | None,
+    q: str = "",
+    status: str = "",
+    sender: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 500,
+    path: Path | None = None,
+) -> list[dict]:
+    """Records for the records screen, newest first. `session_id=None` = every
+    session — for local tools only, never for the public API."""
+    where, args = [], []
+    if session_id is not None:
+        where.append("session_id = ?")
+        args.append(session_id)
+    if status:
+        where.append("status = ?")
+        args.append(status)
+    if sender:
+        where.append("sending_entity = ?")
+        args.append(sender)
+    if date_from:
+        where.append("received_iso != '' AND received_iso >= ?")
+        args.append(date_from)
+    if date_to:
+        where.append("received_iso != '' AND received_iso <= ?")
+        args.append(date_to)
+    for word in q.split():
+        like = f"%{word}%"
+        where.append(
+            "(first_name LIKE ? OR last_name LIKE ? OR national_id LIKE ? OR central_numbers LIKE ? "
+            "OR commitment_numbers LIKE ? OR sending_entity LIKE ? OR source_name LIKE ? "
+            "OR sample_received_date LIKE ?)"
+        )
+        args.extend([like] * 8)
+    sql = "SELECT * FROM records"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC, page_number LIMIT ?"
+    args.append(max(1, min(limit, 5000)))
+    with _LOCK, _connect(path) as conn:
+        rows = conn.execute(sql, args).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        for k in LIST_FIELDS:
+            item[k] = json.loads(item[k] or "[]")
+        out.append(item)
+    return out
+
+
+def record_counts(session_id: str | None, path: Path | None = None) -> dict[str, int]:
+    sql, args = "SELECT status, COUNT(*) AS n FROM records", ()
+    if session_id is not None:
+        sql, args = sql + " WHERE session_id = ?", (session_id,)
+    with _LOCK, _connect(path) as conn:
+        rows = conn.execute(sql + " GROUP BY status", args).fetchall()
+    counts = {row["status"]: row["n"] for row in rows}
+    counts["all"] = sum(counts.values())
+    return counts
+
+
+def find_duplicates(record: FormRecord, session_id: str, path: Path | None = None) -> list[dict]:
+    """Other records of the same session that share a commitment or central number —
+    the same form scanned twice, or a misread. Shown for review; never merged."""
+    numbers = [(k, v) for k in LIST_FIELDS for v in record.fields[k].values if v and "?" not in v]
+    found: dict[str, dict] = {}
+    if not numbers:
+        return []
+    with _LOCK, _connect(path) as conn:
+        for key, value in numbers:
+            rows = conn.execute(
+                f"SELECT record_id, batch_id, source_name, page_number FROM records "
+                f"WHERE session_id = ? AND record_id != ? AND {key} LIKE ?",
+                (session_id, record.record_id, f'%"{value}"%'),
+            ).fetchall()
+            for row in rows:
+                hit = found.setdefault(row["record_id"], {**dict(row), "matches": []})
+                hit["matches"].append(value)
+    return list(found.values())

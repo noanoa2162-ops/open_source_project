@@ -117,10 +117,27 @@ class FormRecord:
     verified: bool = False  # המזכירה בדקה ושמרה כמאומת
     upside_down: bool = False  # המודל אמר שהדף הגיע הפוך; סובב לתצוגה בלבד
     straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
+    # גרסת הרשומה: עולה בכל שינוי. עדכון עם גרסה ישנה נדחה (409) — שני מסכים לא דורסים זה את זה.
+    revision: int = 0
+    created_at: str = field(default_factory=now)
+    updated_at: str = field(default_factory=now)
 
     @property
     def review_count(self) -> int:
         return sum(1 for f in self.fields.values() if f.state == STATE_REVIEW)
+
+    @property
+    def status(self) -> str:
+        """failed | review | ready | approved — for the records screen and its filter."""
+        if self.error:
+            return "failed"
+        if self.verified:
+            return "approved"
+        return "review" if self.review_count else "ready"
+
+    def touch(self) -> None:
+        self.revision += 1
+        self.updated_at = now()
 
     @classmethod
     def empty(cls, batch_id: str, source: SourceFile, page_number: int) -> "FormRecord":
@@ -152,6 +169,8 @@ class Batch:
     seconds: float = 0.0
     # לכל דף, לפי הסדר: {source_index, page_number, status, record_id}
     pages: list[dict] = field(default_factory=list)
+    # הדפדפן שהעלה. ריק = אצווה שנוצרה בקוד (בדיקות) — בלי בעלים.
+    session_id: str = ""
 
     @property
     def review_total(self) -> int:

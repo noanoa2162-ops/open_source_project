@@ -31,6 +31,10 @@ class Settings:
     auto_rotate: bool = True  # לזהות דף מסובב (90°/180°/270°) עם Tesseract ולסובב לפני הקריאה
     # מיתוג המסך: moh = עיצוב משרד הבריאות (באישור נועה, 18/10/2026); neutral = הסמל שלנו
     brand: str = "moh"
+    # קוד גישה לפריסה ציבורית. ריק = בלי מסך כניסה (הרצה מקומית).
+    access_code: str = ""
+    # תקרת עלות יומית לכל השרת יחד — שומרת על הקרדיט בפריסה ציבורית. 0 = בלי תקרה.
+    max_daily_cost_usd: float = 0.0
 
     @property
     def model(self) -> str:
@@ -80,6 +84,8 @@ def load_settings() -> Settings:
         straighten_pages=_flag("STRAIGHTEN_PAGES"),
         auto_rotate=_flag("AUTO_ROTATE"),
         brand="neutral" if (os.environ.get("BRAND") or "moh").strip().lower() == "neutral" else "moh",
+        access_code=(os.environ.get("ACCESS_CODE") or "").strip(),
+        max_daily_cost_usd=float(os.environ.get("MAX_DAILY_COST_USD") or 0),
     )
 
 

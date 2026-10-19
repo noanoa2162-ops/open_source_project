@@ -42,7 +42,7 @@ from app.models import (
 from app.pages import count_pages, render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
 from app.providers.reading import PROMPT_VERSION, NameCheck, union
-from app.store import get, source_dir
+from app.store import get, persist, source_dir
 from app.validators import validate_record
 
 Page = tuple[SourceFile, int, Path]
@@ -102,6 +102,24 @@ def _run(batch_id: str) -> None:
         batch.status = "failed"
         batch.error = "העיבוד נכשל. פרטים בלוג השרת."
         traceback.print_exc()
+    finally:
+        persist(batch)
+
+
+def resume(batch: Batch) -> None:
+    """Start again a batch that was being read when the server stopped.
+
+    Its pages are read from scratch, but every page already paid for comes back
+    from the saved answers (same pixels, model and prompt) — free and identical.
+    """
+    batch.records = []
+    batch.pages = []
+    batch.processed_pages = batch.found_pages = batch.total_pages = 0
+    batch.skipped_pages = batch.budget_skipped_pages = 0
+    batch.status = "queued"
+    batch.warn("הקריאה חודשה אחרי הפעלה מחדש של השרת. טפסים שכבר נקראו חזרו מהתשובות השמורות, בלי עלות.")
+    persist(batch)
+    start(batch.batch_id)
 
 
 def _process(batch_id: str) -> None:
@@ -192,6 +210,7 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
             batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
             status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
             batch.processed_pages += 1
+            persist(batch)  # כל טופס שנקרא נשמר מיד — עצירה באמצע לא מאבדת אותו
 
     # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
     order = {id(record): i for i, record in enumerate(results) if record is not None}
@@ -382,10 +401,12 @@ def _reread_run(batch: Batch, index: int, old: FormRecord, page: dict | None) ->
         old.error = f"הקריאה החוזרת נכשלה: {exc}"
     with _REREAD_LOCK:
         if record is not None:
+            record.revision = old.revision + 1
             batch.records[index] = record
         if page is not None:
             failed = record is None or bool(record.error)
             page["status"] = PAGE_FAILED if failed else PAGE_DONE
+    persist(batch)
 
 
 def show_upright(record: FormRecord, image_path: Path) -> None:
