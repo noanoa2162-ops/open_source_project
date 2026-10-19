@@ -564,8 +564,7 @@ def _page_reading(**fields):
 
     empty = FieldReading(values=[], legibility="absent")
     reading = PageReading(template="kupah_form", **{
-        k: empty for k in PageReading.model_fields
-        if k not in ("template", "issue_date", "birth_date", "upside_down", "note", "commitment_found_by")
+        k: empty for k, spec in PageReading.model_fields.items() if spec.annotation is FieldReading
     })
     for key, value in fields.items():
         setattr(reading, key, value)
@@ -1053,11 +1052,13 @@ def test_batch_with_one_reader_keeps_sure_values_in_normal_colour(tmp_path, monk
     store.delete("bat_one")
 
 
-def test_prompt_v3_carries_the_challenge_rules():
+def test_prompt_carries_the_challenge_rules_and_form_boundaries():
     from app.providers.reading import PROMPT_NAME, load_prompt
 
     text = load_prompt("x")
-    assert PROMPT_NAME == "extract_v3"
+    assert PROMPT_NAME == "extract_v4"
+    for key in ("forms_on_page", "form_boxes", "continues_previous_page"):
+        assert key in text, key
     for rule in ("שדה שלא נמצא נשאר ריק — לא מנוחש", "שומרים את כולם", '"דגימה"',
                  '"דרישה"', "התקבל", "רשימת הגורמים השולחים המוכרים", "העמוד הזה עומד לבד"):
         assert rule in text, rule

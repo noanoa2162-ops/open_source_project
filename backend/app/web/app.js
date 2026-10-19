@@ -105,6 +105,7 @@ function cropUrl(r, key, i){
   const q = [];
   if (inkView) q.push('ink=1');
   if (i != null) q.push('i=' + i);
+  if (r.sub_forms > 1) q.push('rec=' + encodeURIComponent(r.record_id));   // כמה טפסים באותו עמוד
   return pageUrl(r) + '/crops/' + key + (q.length ? '?' + q.join('&') : '');
 }
 // כשיש כמה ערכים עם מיקום לכל אחד (למשל שני מספרים מרכזיים) — תקריב לכל ערך
@@ -123,8 +124,10 @@ function firstValue(r, key){ return (r.fields[key] && r.fields[key].values[0]) |
 function statusBadge(r){
   if (r.error) return '<span class="badge fail">✗ הקריאה נכשלה</span>';
   if (isApproved(r)) return '<span class="badge ok">✓ מאושר</span>';
-  const dup = r.duplicates && r.duplicates.length
+  let dup = r.duplicates && r.duplicates.length
     ? ' <span class="badge dup" title="' + esc(dupText(r)) + '">⧉ ייתכן כפול</span>' : '';
+  if (r.sub_forms > 1) dup += ' <span class="badge dup" title="בעמוד היו כמה טפסים; זה הופרד אוטומטית">טופס ' + r.sub_form + '/' + r.sub_forms + ' בעמוד</span>';
+  if (r.extra_pages && r.extra_pages.length) dup += ' <span class="badge dup" title="הטופס נמשך על כמה עמודים">עמודים ' + esc(r.page_label) + '</span>';
   if (r.review_count) return '<span class="badge review"><b>' + r.review_count + '</b> לבדיקה</span>' + dup;
   return '<span class="badge ready">מוכן לאישור</span>' + dup;
 }

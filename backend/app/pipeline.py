@@ -174,9 +174,9 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
     stop = threading.Event()
     spent = [0.0]
     spent_lock = threading.Lock()
-    results: list[FormRecord | None] = [None] * len(pages)
+    results: list[list[FormRecord] | None] = [None] * len(pages)
 
-    def work(index: int) -> tuple[int, FormRecord | None, str]:
+    def work(index: int) -> tuple[int, list[FormRecord] | None, str]:
         if stop.is_set() or reader.exhausted:
             return index, None, "stopped"
         with spent_lock:
@@ -186,35 +186,35 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
         source, page_number, image_path = pages[index]
         if index < len(batch.pages):
             batch.pages[index]["status"] = PAGE_READING
-        record = read_form(reader, image_path, batch.batch_id, source, page_number)
-        if record.upside_down:
-            show_upright(record, image_path)
+        records = read_page(reader, image_path, batch.batch_id, source, page_number)
         with spent_lock:
-            spent[0] += record.cost_usd or 0.0
+            spent[0] += sum(r.cost_usd or 0.0 for r in records)
         if reader.exhausted:
             # חייב להיעשות כאן ולא בתהליך הראשי, אחרת עובד כבר תפס את העמוד הבא.
             stop.set()
-        return index, record, ""
+        return index, records, ""
 
     with ThreadPoolExecutor(max_workers=SETTINGS.max_parallel_calls) as pool:
         futures = [pool.submit(work, i) for i in range(len(pages))]
         for future in as_completed(futures):
-            index, record, why = future.result()
+            index, records, why = future.result()
             status = batch.pages[index] if index < len(batch.pages) else {}
-            if record is None:
+            if records is None:
                 status["status"] = PAGE_SKIPPED
                 if why == "budget":
                     batch.budget_skipped_pages += 1
                 continue
-            results[index] = record
-            batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
-            status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
+            results[index] = records
+            batch.records.extend(records)  # מופיע במסך מיד, לא רק בסוף
+            failed = all(r.error for r in records)
+            status.update(status=PAGE_FAILED if failed else PAGE_DONE, record_id=records[0].record_id)
             batch.processed_pages += 1
             persist(batch)  # כל טופס שנקרא נשמר מיד — עצירה באמצע לא מאבדת אותו
 
-    # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
-    order = {id(record): i for i, record in enumerate(results) if record is not None}
-    batch.records.sort(key=lambda record: order.get(id(record), len(order)))
+    # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים (וכמה טפסים בעמוד — לפי הסדר בעמוד)
+    order = {id(record): (i, j) for i, group in enumerate(results) if group for j, record in enumerate(group)}
+    batch.records.sort(key=lambda record: order.get(id(record), (len(results), 0)))
+    join_continuations(batch)
 
     if batch.budget_skipped_pages:
         batch.warn(
@@ -222,6 +222,109 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
             f"{batch.budget_skipped_pages} טפסים לא עובדו. ניתן לשנות את MAX_COST_PER_BATCH_USD."
         )
     return results
+
+
+SPLIT_MARGIN = 0.015  # שוליים סביב כל טופס שנחתך מעמוד עם כמה טפסים
+MAX_FORMS_PER_PAGE = 6
+
+
+def read_page(
+    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int
+) -> list[FormRecord]:
+    """One page → one or more records.
+
+    Usually a page is one form. When the reader reports several separate forms
+    on the page (two forms photographed side by side), each form is cut out and
+    read on its own — one more reading per extra form, only for such pages — so
+    no record mixes two patients. Each split record is flagged for review.
+    """
+    record = read_form(reader, image_path, batch_id, source, page_number)
+    if record.upside_down:
+        show_upright(record, image_path)
+    boxes = record.form_regions[:MAX_FORMS_PER_PAGE]
+    if record.error or record.forms_on_page < 2 or len(boxes) < 2:
+        if not record.error and record.forms_on_page >= 2:
+            # המודל ראה כמה טפסים אבל לא נתן גבולות שמישים — לא מנחשים, רק מסמנים
+            record.fields["commitment_numbers"].flag("split_page")
+            record.model_note = " · ".join(filter(None, [record.model_note,
+                                                         f"בעמוד נראים {record.forms_on_page} טפסים — לוודא שהשדות מטופס אחד"]))
+        return [record]
+
+    parts: list[FormRecord] = []
+    for number, box in enumerate(boxes, start=1):
+        wide = (max(0.0, box[0] - SPLIT_MARGIN), max(0.0, box[1] - SPLIT_MARGIN),
+                min(1.0, box[2] + SPLIT_MARGIN), min(1.0, box[3] + SPLIT_MARGIN))
+        crop = _cut(image_path, wide, image_path.with_name(f"{image_path.stem}-f{number}.png"))
+        part = read_form(reader, crop, batch_id, source, page_number)
+        part.sub_form, part.sub_forms = number, len(boxes)
+        part.forms_on_page = 1
+        part.form_regions = []
+        _to_page(part, wide)
+        if not part.error:
+            part.fields["commitment_numbers"].flag("split_page")
+        parts.append(part)
+    # הקריאה של העמוד כולו (שגילתה את הגבולות) נספרת בעלות של הטופס הראשון
+    parts[0].cost_usd = (parts[0].cost_usd or 0.0) + (record.cost_usd or 0.0)
+    return parts
+
+
+def _cut(page_png: Path, box: Region, target: Path) -> Path:
+    """Exactly `box` of the page, at full resolution — no margin, no resize — so
+    positions on the cut-out map straight back to the page."""
+    with Image.open(page_png) as page:
+        w, h = page.size
+        x0, y0 = int(box[0] * w), int(box[1] * h)
+        piece = page.crop((x0, y0, max(x0 + 1, int(box[2] * w)), max(y0 + 1, int(box[3] * h))))
+        piece.save(target, format="PNG")
+    return target
+
+
+def _to_page(record: FormRecord, box: Region) -> None:
+    """Boxes measured on a cut-out → boxes on the full page, so zoom and frame work."""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+
+    def move(r: Region | None) -> Region | None:
+        return None if r is None else (x0 + r[0] * w, y0 + r[1] * h, x0 + r[2] * w, y0 + r[3] * h)
+
+    for field in record.fields.values():
+        field.region = move(field.region)
+        field.value_regions = [move(r) for r in field.value_regions]
+
+
+def join_continuations(batch: Batch) -> None:
+    """A page that only continues the form on the previous page of the same file
+    joins that form's record instead of becoming an empty record of its own.
+
+    Only empty fields are filled from the continuation, every filled one is
+    flagged, and the page numbers are kept — nothing is merged silently."""
+    kept: list[FormRecord] = []
+    for record in batch.records:
+        previous = kept[-1] if kept else None
+        joinable = (
+            record.continues_previous and not record.error and record.sub_forms == 0
+            and previous is not None and not previous.error and previous.sub_forms == 0
+            and previous.source_index == record.source_index
+            and record.page_number == (previous.extra_pages or [previous.page_number])[-1] + 1
+        )
+        if not joinable:
+            kept.append(record)
+            continue
+        previous.extra_pages.append(record.page_number)
+        previous.cost_usd = (previous.cost_usd or 0.0) + (record.cost_usd or 0.0)
+        previous.seconds += record.seconds
+        for key, field in previous.fields.items():
+            extra = record.fields[key]
+            if extra.values and not field.values:
+                field.values = list(extra.values)
+                field.region = None  # המיקום הוא בעמוד אחר — לא מציגים תקריב שגוי
+                field.value_regions = []
+                field.reasons = [r for r in field.reasons if r not in ("missing", "not_on_form")]
+                field.flag("joined_pages")
+        for page in batch.pages:
+            if page.get("record_id") == record.record_id:
+                page["record_id"] = previous.record_id
+    batch.records = kept
 
 
 def read_form(
@@ -513,6 +616,7 @@ def _load_saved(key: tuple) -> RawExtraction | None:
         data["regions"] = {
             k: (tuple(v) if v is not None else None) for k, v in (data.get("regions") or {}).items()
         }
+        data["form_regions"] = [tuple(v) for v in data.get("form_regions") or [] if v]
         return RawExtraction(**data)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None

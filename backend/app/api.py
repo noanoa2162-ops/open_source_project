@@ -27,7 +27,7 @@ from PIL import Image
 from app import db, gold, pipeline, store
 from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
-from app.excel import neutralize, preview as excel_preview, records_workbook_bytes, workbook_bytes
+from app.excel import neutralize, page_label, preview as excel_preview, records_workbook_bytes, workbook_bytes
 from app.fields import FIELDS, FIELDS_BY_KEY
 from app.files import ACCEPTED_LABEL, sniff_kind
 from app.models import (
@@ -312,15 +312,15 @@ def field_crop(
     field_key: str,
     ink: bool = False,
     i: int | None = None,
+    rec: str = "",
 ) -> FileResponse:
-    """The enlarged cut-out of one field, for the lower half of the split panel."""
+    """The enlarged cut-out of one field, for the lower half of the split panel.
+    `rec` picks the record when one page held several forms."""
     batch = _require(request, batch_id)
     if field_key not in FIELDS_BY_KEY and field_key != FULL_NAME:
         raise HTTPException(404, "שדה לא מוכר.")
-    record = next(
-        (r for r in batch.records if r.source_index == source_index and r.page_number == page_number),
-        None,
-    )
+    on_page = [r for r in batch.records if r.source_index == source_index and r.page_number == page_number]
+    record = next((r for r in on_page if r.record_id == rec), on_page[0] if on_page else None)
     if not record:
         region = None
     elif field_key == FULL_NAME:
@@ -336,7 +336,8 @@ def field_crop(
         # אין מיקום — לא ממציאים תקריב. המסך יציג את העמוד המלא בלבד.
         raise HTTPException(404, "אין מיקום לשדה זה.")
     target = pipeline.crop_path(batch_id, source_index, page_number,
-                                field_key if i is None else f"{field_key}-{i}")
+                                (field_key if i is None else f"{field_key}-{i}")
+                                + (f"-f{record.sub_form}" if record.sub_form else ""))
     # המיקום בשם הקובץ: אחרי קריאה חוזרת או תיקון מיקום — תקריב חדש, לא הישן
     place = hashlib.sha256(repr(tuple(round(v, 4) for v in region)).encode()).hexdigest()[:8]
     target = target.with_name(f"{target.stem}-{place}.png")
@@ -641,6 +642,10 @@ def _serialise(batch: Batch) -> dict:
                 "status": r.status,
                 "revision": r.revision,
                 "straightened": r.straightened,
+                "sub_form": r.sub_form,
+                "sub_forms": r.sub_forms,
+                "extra_pages": r.extra_pages,
+                "page_label": page_label(r),
                 "duplicates": _duplicates(batch, r),
                 "full_name_crop": full_name_region(r) is not None,
                 "fields": {

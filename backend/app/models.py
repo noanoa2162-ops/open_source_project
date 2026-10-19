@@ -117,6 +117,14 @@ class FormRecord:
     verified: bool = False  # המזכירה בדקה ושמרה כמאומת
     upside_down: bool = False  # המודל אמר שהדף הגיע הפוך; סובב לתצוגה בלבד
     straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
+    # גבולות הטופס. sub_form = מספר הטופס בעמוד (1..sub_forms) כשבעמוד אחד היו כמה טפסים;
+    # extra_pages = עמודים נוספים של אותו טופס (טופס רב-עמודי). שניהם מסומנים לבדיקה.
+    sub_form: int = 0
+    sub_forms: int = 0
+    extra_pages: list[int] = field(default_factory=list)
+    continues_previous: bool = False
+    forms_on_page: int = 1
+    form_regions: list[Region] = field(default_factory=list)
     # גרסת הרשומה: עולה בכל שינוי. עדכון עם גרסה ישנה נדחה (409) — שני מסכים לא דורסים זה את זה.
     revision: int = 0
     created_at: str = field(default_factory=now)

@@ -53,6 +53,16 @@ def record_rows(record: FormRecord) -> list[list[str]]:
     return [[*base[:column], number, *base[column + 1:]] for number in commitments]
 
 
+def page_label(record: FormRecord) -> str:
+    """"3", "3–4" for a form over two pages, "3 (טופס 2 מתוך 2)" for one of two forms on a page."""
+    label = str(record.page_number)
+    if record.extra_pages:
+        label += "–" + str(record.extra_pages[-1])
+    if record.sub_forms > 1:
+        label += f" (טופס {record.sub_form} מתוך {record.sub_forms})"
+    return label
+
+
 def record_row(record: FormRecord) -> list[str]:
     cells = [MULTI_SEPARATOR.join(record.fields[f.key].values) for f in FIELDS]
     flagged = [f for f in record.fields.values() if f.state == STATE_REVIEW]
@@ -60,7 +70,7 @@ def record_row(record: FormRecord) -> list[str]:
     return [
         *cells,
         record.source_name,
-        str(record.page_number),
+        page_label(record),
         str(len(flagged)),
         "; ".join(reasons),
     ]

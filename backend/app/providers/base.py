@@ -49,7 +49,11 @@ class RawExtraction:
     context: dict[str, str] = field(default_factory=dict)
     template: str = ""
     usage: Usage | None = None
-    upside_down: bool = False  # השופט דיווח שהדף בתמונה הפוך (180°)
+    upside_down: bool = False  # הקורא דיווח שהדף בתמונה הפוך (180°)
+    # גבולות הטופס: כמה טפסים בעמוד ואיפה כל אחד (0–1 מהעמוד), והאם העמוד ממשיך את הקודם
+    forms_on_page: int = 1
+    form_regions: list[Region] = field(default_factory=list)
+    continues_previous: bool = False
 
 
 class ExtractionProvider(Protocol):
