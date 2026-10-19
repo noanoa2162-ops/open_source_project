@@ -23,21 +23,42 @@ MAX_PIXELS = 60_000_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 
-def render_pages(source: Path, out_dir: Path, limit: int | None = None) -> tuple[list[Path], int]:
+def count_pages(source: Path) -> int:
+    """How many pages the file has — instant, nothing is rendered. 0 if unreadable."""
+    try:
+        if sniff_path(source) == KIND_PDF:
+            pdf = pdfium.PdfDocument(source)
+            try:
+                return len(pdf)
+            finally:
+                pdf.close()
+        return 1
+    except Exception:  # noqa: BLE001 - קובץ פגום ייתפס בשלב הרינדור עצמו
+        return 0
+
+
+def render_pages(
+    source: Path, out_dir: Path, limit: int | None = None, on_page=None,
+) -> tuple[list[Path], int]:
     """Write page-001.png, page-002.png … into `out_dir`.
 
     Returns `(written_paths, total_pages_in_document)` so the caller can tell
-    the user when a long document was cut short.
+    the user when a long document was cut short. `on_page(number, path)` is
+    called after each page is ready — so the screen can count forms as they
+    are found, not only at the end.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = limit if limit is not None else SETTINGS.max_pages_per_batch
 
     if sniff_path(source) == KIND_PDF:
-        return _render_pdf(source, out_dir, cap)
-    return _render_image(source, out_dir), 1
+        return _render_pdf(source, out_dir, cap, on_page)
+    written = _render_image(source, out_dir)
+    if on_page:
+        on_page(1, written[0])
+    return written, 1
 
 
-def _render_pdf(source: Path, out_dir: Path, cap: int) -> tuple[list[Path], int]:
+def _render_pdf(source: Path, out_dir: Path, cap: int, on_page=None) -> tuple[list[Path], int]:
     pdf = pdfium.PdfDocument(source)
     try:
         total = len(pdf)
@@ -53,6 +74,8 @@ def _render_pdf(source: Path, out_dir: Path, cap: int) -> tuple[list[Path], int]
             image.close()
             page.close()
             written.append(target)
+            if on_page:
+                on_page(index + 1, target)
         return written, total
     finally:
         pdf.close()

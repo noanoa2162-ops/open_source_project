@@ -409,9 +409,22 @@ def test_export_is_locked_until_no_field_is_orange(api):
     res = client.post("/api/batches/bat_api/export")
     assert res.status_code == 409, "אין ייצוא לאקסל כל עוד יש שדה כתום"
     _approve_open_fields(client, record)
+    client.post(f"/api/records/{record.record_id}/verify")
     res = client.post("/api/batches/bat_api/export")
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
+
+
+def test_export_waits_for_the_last_form_to_be_approved(api):
+    """בלי שדות כתומים, אבל הטופס לא אושר ב"אישור הטופס" — עדיין אין ייצוא."""
+    client, record = api
+    _approve_open_fields(client, record)
+    res = client.post("/api/batches/bat_api/export")
+    assert res.status_code == 409 and "לאישור" in res.json()["detail"]
+    assert client.get("/api/batches/bat_api").json()["unverified"] == 1
+    client.post(f"/api/records/{record.record_id}/verify")
+    assert client.get("/api/batches/bat_api").json()["unverified"] == 0
+    assert client.post("/api/batches/bat_api/export").status_code == 200
 
 
 def test_export_is_locked_while_still_reading(api):
@@ -531,7 +544,8 @@ def _page_reading(**fields):
 
     empty = FieldReading(values=[], legibility="absent")
     reading = PageReading(template="kupah_form", **{
-        k: empty for k in PageReading.model_fields if k not in ("template", "issue_date", "birth_date", "upside_down", "note")
+        k: empty for k in PageReading.model_fields
+        if k not in ("template", "issue_date", "birth_date", "upside_down", "note", "commitment_found_by")
     })
     for key, value in fields.items():
         setattr(reading, key, value)
@@ -597,12 +611,12 @@ def test_page_sent_to_claude_fits_its_limit(tmp_path):
     import base64
     import io
 
-    from app.providers.claude_vision import MAX_LONG_SIDE, page_png_b64
+    from app.providers.claude_vision import MAX_LONG_SIDE, MAX_PIXELS, page_png_b64
 
     page = png(tmp_path / "p.png", size=(2481, 3509))
     data = base64.b64decode(page_png_b64(page))
     with Image.open(io.BytesIO(data)) as sent:
-        assert max(sent.size) == MAX_LONG_SIDE
+        assert max(sent.size) <= MAX_LONG_SIDE and sent.size[0] * sent.size[1] <= MAX_PIXELS
         assert sent.size[0] / sent.size[1] == pytest.approx(2481 / 3509, rel=0.01)
 
 
@@ -695,7 +709,7 @@ def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
     assert raw.model == "claude-opus-5-5"
 
 
-def test_claude_sends_the_whole_page_and_four_sharp_quarters(tmp_path):
+def test_claude_sends_the_page_once(tmp_path):
     from app.providers import claude_vision as cv
 
     sent = {}
@@ -705,10 +719,8 @@ def test_claude_sends_the_whole_page_and_four_sharp_quarters(tmp_path):
     judge.extract(page)
 
     images = [c for c in sent["content"] if c["type"] == "image"]
-    assert len(images) == 5, "העמוד המלא ועוד ארבעה רבעים חדים"
+    assert len(images) == 1, "תמונה אחת — העמוד עצמו (בלי חלוקה לרבעים)"
     assert images[0]["source"]["data"] == cv.page_png_b64(page)
-    labels = [c["text"] for c in sent["content"] if c["type"] == "text"][:5]
-    assert labels[0].startswith("תמונה 0") and labels[4].startswith("תמונה 4")
     assert sent["content"][-1]["type"] == "text"
 
 def _blocking_client(sent_types, block, status=418):
@@ -770,12 +782,13 @@ def test_jpeg_versions_keep_the_page_size(tmp_path):
     import base64
     import io
 
-    from app.providers.claude_vision import MAX_LONG_SIDE, page_jpeg_b64
+    from app.providers.claude_vision import MAX_LONG_SIDE, MAX_PIXELS, page_jpeg_b64
 
     page = png(tmp_path / "p.png", size=(2481, 3509))
     for gray in (False, True):
         with Image.open(io.BytesIO(base64.b64decode(page_jpeg_b64(page, gray=gray)))) as sent:
-            assert sent.format == "JPEG" and max(sent.size) == MAX_LONG_SIDE
+            assert sent.format == "JPEG" and max(sent.size) <= MAX_LONG_SIDE
+            assert sent.size[0] * sent.size[1] <= MAX_PIXELS
             assert sent.mode == ("L" if gray else "RGB")
 
 

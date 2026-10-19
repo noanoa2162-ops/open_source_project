@@ -453,3 +453,16 @@ def test_progress_counts_every_finished_page(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- provider
 
 
+
+
+def test_page_count_is_known_before_any_page_is_prepared(tmp_path):
+    """המסך מראה אחוזים בזמן הזיהוי — לכן הסך הכולל נספר מיד, בלי לרנדר."""
+    from app.pages import count_pages
+
+    assert count_pages(_pdf(tmp_path / "three.pdf", 3)) == 3
+    image = tmp_path / "one.png"
+    Image.new("RGB", (100, 140), "white").save(image)
+    assert count_pages(image) == 1
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"%PDF-1.7 not really")
+    assert count_pages(broken) == 0

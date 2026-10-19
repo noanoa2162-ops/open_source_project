@@ -22,3 +22,10 @@ def _no_real_tesseract(monkeypatch):
     from app import pages
 
     monkeypatch.setattr(pages, "SETTINGS", replace(pages.SETTINGS, auto_rotate=False))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_database(tmp_path, monkeypatch):
+    """Approved forms go to a temporary database, never to work/forms.db."""
+    monkeypatch.setattr("app.db.DB_PATH", tmp_path / "forms.db")
+    monkeypatch.setattr("app.db.PAGES_DIR", tmp_path / "approved_pages")

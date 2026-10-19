@@ -209,7 +209,11 @@
       <div class="cards" id="fvCards" role="list" aria-label="שדות הטופס"></div>
       <div class="formnav">
         <div class="dots" id="formDots" aria-hidden="true"></div>
-        <button class="primary" id="fvApprove">✓ אישור הטופס</button>
+        <span class="fvacts">
+          <button class="secondary" id="fvNew">⬆ קליטה חדשה</button>
+          <button class="secondary" id="fvExport" disabled>⬇ ייצוא לאקסל</button>
+          <button class="primary" id="fvApprove">✓ אישור הטופס</button>
+        </span>
       </div>
     </div>
   </section>
@@ -262,8 +266,10 @@
     <div class="modalfoot">
       <span class="xlfile" id="xlFile"></span>
       <span class="grow"></span>
+      <span class="xldone hidden" id="xlDone">✓ הקובץ ירד</span>
       <button class="secondary" id="xlCancel">ביטול</button>
       <button class="primary" id="xlDownload">⬇ הורדת הקובץ</button>
+      <button class="primary hidden" id="xlNew">⬆ קליטה חדשה</button>
     </div>
   </div>
 </div>
@@ -281,6 +287,23 @@
       <span class="grow"></span>
       <button class="secondary" id="rrCancel">ביטול</button>
       <button class="primary" id="rrYes">↻ כן, קרא שוב</button>
+    </div>
+  </div>
+</div>
+
+<!-- אישור לפני קליטה חדשה כשיש טפסים שעוד לא אושרו (המאושרים כבר שמורים במסד) -->
+<div id="newConfirm" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="ncTitle" aria-describedby="ncText">
+  <div class="modalbox rrbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="ncTitle">להתחיל קליטה חדשה?</h2>
+        <p class="sub" id="ncText"></p>
+      </div>
+    </div>
+    <div class="modalfoot">
+      <span class="grow"></span>
+      <button class="secondary" id="ncCancel">ביטול</button>
+      <button class="primary" id="ncYes">⬆ כן, קליטה חדשה</button>
     </div>
   </div>
 </div>

@@ -190,7 +190,7 @@ function showProgress(title, names){
 async function upload(fileList){
   const files = Array.prototype.slice.call(fileList || []);
   if (!files.length) return;
-  showProgress(files.length === 1 ? 'מעלה את הקובץ…' : 'מעלה ' + files.length + ' קבצים…',
+  showProgress('קולט את הטפסים…',
                files.map(function(f){ return f.name; }));
   const body = new FormData();
   files.forEach(function(f){ body.append('files', f); });
@@ -218,7 +218,7 @@ function begin(info){
   processing = true;
   if (info.rejected)
     notice('warn', info.rejected + ' קבצים לא התקבלו', 'הם מופיעים ברשימה עם הסיבה. שאר הקבצים מעובדים כרגיל.');
-  $('#pTitle').textContent = 'מזהה טפסים…';
+  $('#pTitle').textContent = 'קולט את הטפסים…';
   startClock();
   clearInterval(timer);
   timer = setInterval(tick, 900);
@@ -237,64 +237,80 @@ function fail(msg){
 }
 
 /* ------------------------------------------------------------ התקדמות חיה */
-// גלגל עם שובל שמקיף כל הזמן, קשת שמתמלאת, ומספר שעולה אחד-אחד.
-// כמה טפסים נקראים במקביל ולכן נגמרים כמעט יחד — במקום קפיצה, סופרים 1… 2… 3…
-// ובכל צעד עולה אריח אחד מאחור. הקשת והאריחים הולכים יחד עם המספר.
+// גלגל אחד באחוזים, מההעלאה ועד הסוף — בלי שלבים ובלי "מתוך N". המשתמשת לא צריכה לדעת
+// שקודם מכינים את העמודים ואחר כך קוראים אותם: היא רואה רק כמה מהעבודה כבר נעשתה.
+// הכנת העמודים מהירה ולכן שווה 20%; הקריאה איטית ושווה 80%. טופס שבאמצע קריאה נספר כחצי,
+// כדי שהאחוז לא יעמוד בזמן ההמתנה. האחוז אף פעם לא יורד, ו-100% רק כשהכול גמור.
 const RING_C = 2 * Math.PI * 52;
-const COUNT_STEP = 550;
+const PCT_STEP = 40;        // המספר עולה אחוז-אחוז, לא קופץ
+const TILE_STEP = 500;      // אריח עולה מאחור כל חצי שנייה, כשטופס מוכן
+const PREPARE_SHARE = 20;   // אחוזים להכנת העמודים; השאר לקריאה
 const calm = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
-let ringShown = 0, ringTarget = 0, ringTotal = 0, ringTimer = null;
-let revealQueue = [];
+let ringShown = 0, ringTarget = 0, ringTimer = null;
+let revealQueue = [], revealTimer = null;
 let startedAt = 0, clockTimer = null, etaText = '';
 
 function resetRing(){
   clearTimeout(ringTimer);
   ringTimer = null;
-  ringShown = ringTarget = ringTotal = 0;
+  clearInterval(revealTimer);
+  revealTimer = null;
+  ringShown = ringTarget = 0;
   revealQueue = [];
   stopClock();
   etaText = '';
   $('#pTime').textContent = '';
-  $('#ring').className = 'ring indeterminate';
+  $('#ring').className = 'ring pct';
   $('#ringArc').style.strokeDashoffset = '';
   $('#ringArc').style.opacity = '0';
   $('#ringNum').textContent = '0';
-  $('#ringOf').textContent = 'מכין…';
+  $('#ringOf').textContent = 'הושלמו';
 }
 
-function setRing(done, total){
-  if (!total) return;
-  ringTotal = total;
-  $('#ring').classList.remove('indeterminate');
-  $('#ringOf').textContent = 'מתוך ' + total + (total === 1 ? ' טופס' : ' טפסים');
-  countTo(done);
+// כמה מכל העבודה כבר נעשתה, באחוזים (0–99 בזמן העבודה)
+function progressOf(d){
+  const total = d.total_pages || 0;
+  const expected = total || d.expected_pages || d.found_pages || 0;
+  if (!expected) return 0;
+  const prepared = total ? 1 : Math.min(1, (d.found_pages || 0) / expected);
+  const reading = (d.pages || []).filter(function(p){ return p.status === 'reading'; }).length;
+  const read = total ? Math.min(1, ((d.processed_pages || 0) + reading / 2) / total) : 0;
+  return Math.min(99, Math.floor(PREPARE_SHARE * prepared + (100 - PREPARE_SHARE) * read));
 }
 
 function drawRing(){
-  if (ringTotal) $('#ringArc').style.strokeDashoffset = String(RING_C * (1 - Math.min(1, ringShown / ringTotal)));
-  $('#ringArc').style.opacity = ringShown ? '' : '0';   // בלי נקודה תקועה למעלה כשעוד אין טופס מוכן
+  $('#ringArc').style.strokeDashoffset = String(RING_C * (1 - Math.min(1, ringShown / 100)));
+  $('#ringArc').style.opacity = ringShown ? '' : '0';   // בלי נקודה תקועה למעלה כשעוד אין התקדמות
   $('#ringNum').textContent = ringShown;
 }
 
-function countTo(n){
-  ringTarget = n;
-  if (calm) { ringShown = n; revealQueue.splice(0).forEach(revealTile); drawRing(); return; }
+function countTo(pct){
+  ringTarget = Math.max(ringTarget, pct);  // האחוז אף פעם לא יורד
+  if (calm) { ringShown = ringTarget; drawRing(); return; }
   if (ringTimer) return;
   (function step(){
-    if (ringShown >= ringTarget) { ringShown = ringTarget; drawRing(); ringTimer = null; return; }
+    if (ringShown >= ringTarget) { drawRing(); ringTimer = null; return; }
     ringShown += 1;
-    if (revealQueue.length) revealTile(revealQueue.shift());
     drawRing();
-    ringTimer = setTimeout(step, COUNT_STEP);
+    ringTimer = setTimeout(step, PCT_STEP);
   })();
 }
 
-// מחכים שהספירה תגיע לסוף (ושכל האריחים עלו) — ורק אז ✓
+// האריחים מאחור עולים בקצב שלהם — אחד כל חצי שנייה — ולא קשורים למספר
+function startReveal(){
+  if (revealTimer) return;
+  revealTimer = setInterval(function(){
+    if (revealQueue.length) revealTile(revealQueue.shift());
+  }, calm ? 60 : TILE_STEP);
+}
+
+// בסוף: האחוז מגיע ל-100 וכל האריחים עלו — ורק אז ✓
 function whenCounted(me, cb){
   (function wait(){
     if (me !== batch) return;
-    if (ringTimer || ringShown < ringTarget) return setTimeout(wait, 120);
-    revealQueue.splice(0).forEach(revealTile);
+    if (ringTimer || ringShown < 100 || revealQueue.length) return setTimeout(wait, 120);
+    clearInterval(revealTimer);
+    revealTimer = null;
     cb();
   })();
 }
@@ -329,32 +345,25 @@ async function tick(){
   if (me !== batch || finishing) return;
   const total = d.total_pages || 0, done = d.processed_pages || 0;
   const finished = ['completed', 'partial', 'failed'].indexOf(d.status) !== -1;
-  const reading = (d.pages || []).filter(function(p){ return p.status === 'reading'; }).length;
 
   updateTiles(d);
-  setRing(done, total);
-  if (total) {
-    const waiting = Math.max(0, total - done - reading);
-    $('#pTitle').textContent = 'קורא את הטפסים';
-    $('#pCount').textContent = reading
-      ? 'נקרא' + (reading === 1 ? ' עכשיו טופס אחד' : 'ים עכשיו ' + reading + ' טפסים') + (waiting ? ' · בתור ' + waiting : '')
-      : (waiting ? 'בתור ' + waiting : '');
-    etaText = estimate(done, total);
-  }
+  startReveal();
+  $('#pTitle').textContent = 'קולט את הטפסים…';
+  $('#pCount').textContent = '';
+  countTo(progressOf(d));
+  if (total) etaText = estimate(done, total);
   $('#pFiles').innerHTML = (d.sources || []).map(function(s){
-    const count = s.page_count === 1 ? 'טופס אחד' : (s.page_count || '…') + ' טפסים';
-    const detail = s.error ? '<span class="bad">' + esc(s.error) + '</span>' : '<span class="good">' + count + '</span>';
-    return '<li><bdi>' + esc(s.filename) + '</bdi> — ' + detail + '</li>';
+    const detail = s.error ? ' — <span class="bad">' + esc(s.error) + '</span>' : '';
+    return '<li><bdi>' + esc(s.filename) + '</bdi>' + detail + '</li>';
   }).join('');
   if (!finished) return;
 
-  // הכול נקרא: הספירה מגיעה עד הסוף, ✓, ואז עוברים לאריחים. עד עכשיו אין מה ללחוץ.
+  // הכול נקרא: האחוז מגיע ל-100, ✓, ואז עוברים לאריחים. עד עכשיו אין מה ללחוץ.
   clearInterval(timer);
   finishing = true;
   if (d.status === 'failed') { finishing = false; return fail(d.error || 'העיבוד נכשל'); }
   const n = d.records.length;
-  setRing(total || n, total || n);
-  $('#pCount').textContent = '';
+  countTo(100);
   etaText = '';
   whenCounted(me, function(){ finish(me, d, n, total); });
 }
@@ -463,15 +472,17 @@ function updateChips(d){
   const reviewForms = d.records.filter(function(r){ return r.review_count > 0; }).length;
   $('#navReviewN').textContent = reviewForms || '';
   $('#navReview').disabled = !d.records.length;
-  // ייצוא רק אחרי שכל שדה כתום תוקן או אושר (השרת אוכף את אותו כלל)
-  const ready = !processing && d.records.length > 0 && d.review_total === 0;
+  // ייצוא רק אחרי שכל שדה כתום טופל **וכל טופס אושר** ב"אישור הטופס" (השרת אוכף את אותו כלל)
+  const open = unverifiedCount(d);
+  const ready = !processing && d.records.length > 0 && d.review_total === 0 && open === 0;
   const why = !d.records.length ? 'אין טפסים לייצוא' : processing ? 'הייצוא ייפתח בסוף הקריאה'
-    : d.review_total ? 'נשארו ' + d.review_total + ' שדות לבדיקה לפני ייצוא' : '';
-  $('#download').disabled = !ready;
-  $('#navExport').disabled = !ready;
+    : d.review_total ? 'נשארו ' + d.review_total + ' שדות לבדיקה לפני ייצוא'
+    : open ? (open === 1 ? 'נשאר טופס אחד לאישור לפני ייצוא' : 'נשארו ' + open + ' טפסים לאישור לפני ייצוא') : '';
+  ['#download', '#navExport', '#fvExport'].forEach(function(sel){
+    $(sel).disabled = !ready;
+    $(sel).title = why || 'הורדת כל הטפסים לקובץ Excel';
+  });
   $('#exportHint').textContent = why;
-  $('#download').title = why || 'הורדת כל הטפסים לקובץ Excel';
-  $('#navExport').title = why || 'הורדת כל הטפסים לקובץ Excel';
   if (!ready) $('#download').classList.remove('ready');
   const senders = Array.from(new Set(d.records.map(senderOf).filter(Boolean))).sort();
   const sel = $('#senderFilter');
@@ -517,7 +528,10 @@ $('#q').addEventListener('keydown', function(e){
 });
 
 // תפריט הגלולות בכותרת המשנה
-$('#navUpload').onclick = function(){ window.scrollTo({ top: 0, behavior: 'smooth' }); };
+$('#navUpload').onclick = function(){
+  if (last && last.records && last.records.length) return startNewIntake($('#navUpload'));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+};
 $('#navReview').onclick = function(){
   const b = document.querySelector('.filters button[data-filter="review"]');
   if (b) b.click();
@@ -1286,12 +1300,24 @@ function renderZoom(force){
   panel.classList.remove('hidden');
   viewer.classList.add('zoomed');
   if (deg) panel.querySelectorAll('.zcrop img').forEach(function(img){ fitTurned(img, img.parentNode, img, deg, 0.5); });
+  else setupPans(panel);
 }
 
 // התמונה בתקריב: חיתוך אחד, או לשמות — חיתוך משותף כשהם באותו אזור, אחרת שניים זה מתחת לזה
 function zoomCrops(r, key){
-  const crop = function(k, label){
-    return '<div class="zcrop pv-cropwrap"><img alt="תקריב של ' + esc(label) + '" src="' + cropUrl(r, k) + '"></div>';
+  // בדף ישר — חלון שאפשר לגרור על העמוד המלא; בדף מסובב — התמונה החתוכה, כמו קודם
+  const turned = viewTurn[r.record_id] || 0;
+  const box = function(k){
+    if (k === 'full_name') {
+      const a = r.fields.first_name.crop_box, b = r.fields.last_name.crop_box;
+      return a && b ? [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])] : (a || b);
+    }
+    return r.fields[k].crop_box;
+  };
+  const crop = function(k, label, i){
+    const b = i != null ? r.fields[k].crop_boxes[i] : box(k);
+    if (!turned && b) return panHtml(r, b, label);
+    return '<div class="zcrop pv-cropwrap"><img alt="תקריב של ' + esc(label) + '" src="' + cropUrl(r, k, i) + '"></div>';
   };
   if (isName(key)) {
     if (r.full_name_crop) return crop('full_name', 'שם פרטי ושם משפחה') + placeNote(r, NAME_KEYS);
@@ -1305,12 +1331,102 @@ function zoomCrops(r, key){
     const f = r.fields[key];
     return f.crop_boxes.map(function(b, i){
       return b ? '<p class="zsub">' + esc(fieldLabel(key)) + ' — <bdi>' + esc(f.values[i]) + '</bdi></p>' +
-        '<div class="zcrop pv-cropwrap"><img alt="תקריב של ' + esc(f.values[i]) + '" src="' + cropUrl(r, key, i) + '"></div>' : '';
+        crop(key, f.values[i], i) : '';
     }).join('') + placeNote(r, [key]);
   } else if (r.fields[key].crop_box) {
     return crop(key, fieldLabel(key)) + placeNote(r, [key]);
   }
   return '<div class="zcrop none">אין מיקום לשדה הזה בטופס — בדקו בעמוד המלא שמימין</div>';
+}
+
+/* ------------------------------------------------------------ תקריב שגוררים (רק במצב טופס) */
+// התקריב הוא חלון על העמוד המלא: בהתחלה בדיוק על השדה, ואפשר לגרור ולראות מה מסביב.
+// המסגרת הכתומה על הטופס שמימין זזה יחד איתו — תמיד רואים איפה עומדים.
+function pageSrc(r){ return pageUrl(r) + (inkView ? '?ink=1' : ''); }
+
+function panHtml(r, b, label){
+  return '<div class="zcrop zpan" tabindex="0" role="img" data-box="' + b.join(',') + '" aria-label="תקריב של ' +
+    esc(label) + ' — גררו כדי לזוז במסמך, Home חוזר לשדה"><img alt="" draggable="false" src="' + pageSrc(r) + '">' +
+    '<button class="zhome hidden" type="button" tabindex="-1" title="חזרה לשדה (Home)">↺ חזרה לשדה</button></div>';
+}
+
+function setupPans(panel){
+  panel.querySelectorAll('.zpan').forEach(function(view){
+    const img = view.querySelector('img');
+    const ready = function(){ startPan(view, img); };
+    if (img.complete && img.naturalWidth) ready(); else img.addEventListener('load', ready, { once: true });
+  });
+}
+
+function startPan(view, img){
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const b = view.dataset.box.split(',').map(Number);
+  const rw = (b[2] - b[0]) * W, rh = (b[3] - b[1]) * H;
+  const vw = view.clientWidth;
+  const vh = Math.max(110, Math.min(vw * rh / rw, window.innerHeight * 0.36));
+  view.style.height = vh + 'px';
+  const z = Math.min(vw / rw, vh / rh);
+  img.style.width = W * z + 'px';
+  img.style.height = H * z + 'px';
+  const st = { tx: 0, ty: 0 };
+  const home = function(){
+    st.tx = vw / 2 - (b[0] + b[2]) / 2 * W * z;
+    st.ty = vh / 2 - (b[1] + b[3]) / 2 * H * z;
+    place(false);
+    view.querySelector('.zhome').classList.add('hidden');
+    const page = $('#fvFrame .pv-page'), r = currentRecord();  // המסגרות המקוריות חוזרות לטופס
+    if (page && r) {
+      page.querySelectorAll('.pv-box').forEach(function(old){ old.remove(); });
+      page.insertAdjacentHTML('beforeend', boxesHtml(r, FIELDS[cardIndex].key));
+    }
+  };
+  const place = function(moved){
+    st.tx = Math.min(0, Math.max(vw - W * z, st.tx));
+    st.ty = Math.min(0, Math.max(vh - H * z, st.ty));
+    img.style.transform = 'translate(' + st.tx + 'px,' + st.ty + 'px)';
+    if (!moved) return;
+    view.querySelector('.zhome').classList.remove('hidden');
+    followOnPage([-st.tx / (W * z), -st.ty / (H * z), (vw - st.tx) / (W * z), (vh - st.ty) / (H * z)]);
+  };
+  view._home = home;
+  home();
+
+  let last = null;
+  view.onpointerdown = function(e){
+    if (e.button !== 0 || e.target.closest('.zhome')) return;
+    view.setPointerCapture(e.pointerId);
+    last = { x: e.clientX, y: e.clientY };
+    view.classList.add('drag');
+  };
+  view.onpointermove = function(e){
+    if (!last) return;
+    st.tx += e.clientX - last.x;
+    st.ty += e.clientY - last.y;
+    last = { x: e.clientX, y: e.clientY };
+    place(true);
+  };
+  view.onpointerup = view.onpointercancel = function(){ last = null; view.classList.remove('drag'); };
+  view.querySelector('.zhome').onclick = function(e){ e.stopPropagation(); home(); view.focus({ preventScroll: true }); };
+  view.onkeydown = function(e){
+    const step = 40;
+    const moves = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] };
+    if (e.key === 'Home') { e.preventDefault(); e.stopPropagation(); return home(); }
+    if (!moves[e.key]) return;
+    e.preventDefault();
+    e.stopPropagation();  // החצים מזיזים את התקריב, לא עוברים שדה/טופס
+    st.tx += moves[e.key][0];
+    st.ty += moves[e.key][1];
+    place(true);
+  };
+}
+
+// המסגרת על הטופס שמימין = בדיוק מה שמוצג עכשיו בתקריב
+function followOnPage(v){
+  const page = $('#fvFrame .pv-page');
+  if (!page) return;
+  page.querySelectorAll('.pv-box').forEach(function(old){ old.remove(); });
+  page.insertAdjacentHTML('beforeend', '<div class="pv-box" style="left:' + v[0] * 100 + '%;top:' + v[1] * 100 +
+    '%;width:' + (v[2] - v[0]) * 100 + '%;height:' + (v[3] - v[1]) * 100 + '%;transition:none"></div>');
 }
 
 // מה ידוע על המיקום: אומת מול הטופס, תוקן אוטומטית, או רק לפי המנוע
@@ -1561,7 +1677,8 @@ async function verify(recordId){
   lastSignature = '';
   render(d, true);
   toast('✓ הטופס אושר ונשמר כמאומת');
-  if (view === 'form') goForm(1);
+  // לטופס הבא — אם יש. בטופס האחרון נשארים, והחגיגה וחלונית הייצוא נפתחות מעצמן
+  if (view === 'form' && formIndex < visibleRecords().length - 1) goForm(1);
 }
 
 /* ------------------------------------------------------------ מקלדת במצב טופס */
@@ -1569,6 +1686,7 @@ document.addEventListener('keydown', function(e){
   if (!$('#xlPreview').classList.contains('hidden')) return previewKeys(e);
   if (pz.open) return pageZoomKeys(e);
   if (!$('#rrConfirm').classList.contains('hidden')) return rereadKeys(e);
+  if (!$('#newConfirm').classList.contains('hidden')) return newConfirmKeys(e);
   if (e.key === 'Escape') { closePop(); if (!$('#tour').classList.contains('hidden')) closeTour(); }
   if (view !== 'form' || $('#results').classList.contains('hidden') || !$('#tour').classList.contains('hidden')) return;
   const tag = (e.target.tagName || '').toLowerCase();
@@ -1600,6 +1718,10 @@ function plural(n, one, many){ return n === 1 ? one : n + ' ' + many; }
 async function openExportPreview(opener){
   if ($('#download').disabled || !batch) return;
   xlOpener = opener || $('#download');
+  $('#xlDone').classList.add('hidden');
+  $('#xlNew').classList.add('hidden');
+  $('#xlDownload').classList.remove('hidden');
+  $('#xlCancel').textContent = 'ביטול';
   const res = await fetch('/api/batches/' + batch + '/export/preview');
   if (!res.ok) return toast('לא הצלחנו להכין תצוגה מקדימה — נסו שוב');
   const d = await res.json();
@@ -1636,7 +1758,7 @@ function closeExportPreview(){
 function previewKeys(e){
   if (e.key === 'Escape') { e.preventDefault(); closeExportPreview(); return; }
   if (e.key !== 'Tab') return;
-  const items = $$('#xlPreview button, #xlPreview [tabindex="0"]');
+  const items = $$('#xlPreview button:not(.hidden), #xlPreview [tabindex="0"]');
   const first = items[0], lastItem = items[items.length - 1];
   if (!$('#xlPreview').contains(document.activeElement)) { e.preventDefault(); first.focus(); }
   else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); lastItem.focus(); }
@@ -1644,6 +1766,7 @@ function previewKeys(e){
 }
 
 $('#download').onclick = function(){ openExportPreview($('#download')); };
+$('#fvExport').onclick = function(){ openExportPreview($('#fvExport')); };
 $('#xlClose').onclick = closeExportPreview;
 $('#xlCancel').onclick = closeExportPreview;
 $('#xlPreview').addEventListener('click', function(e){ if (e.target.id === 'xlPreview') closeExportPreview(); });
@@ -1651,7 +1774,12 @@ $('#xlDownload').onclick = async function(){
   $('#xlDownload').disabled = true;
   const ok = await downloadExcel();
   $('#xlDownload').disabled = false;
-  if (ok) closeExportPreview();
+  if (!ok) return;
+  $('#xlDone').classList.remove('hidden');
+  $('#xlDownload').classList.add('hidden');
+  $('#xlNew').classList.remove('hidden');
+  $('#xlCancel').textContent = 'סגירה';
+  $('#xlNew').focus();
 };
 
 async function downloadExcel(){
@@ -1676,7 +1804,40 @@ async function downloadExcel(){
   return true;
 }
 
-$('#again').onclick = function(){
+/* ------------------------------------------------------------ קליטה חדשה — מכל מקום */
+// טפסים שאושרו כבר שמורים במסד הנתונים; שואלים רק כשיש טפסים שעוד לא אושרו.
+let ncOpener = null;
+function startNewIntake(opener){
+  const open = last && last.records ? last.records.filter(function(r){ return !r.verified; }).length : 0;
+  if (!open || processing) return resetToUpload();
+  ncOpener = opener || null;
+  $('#ncText').textContent = (open === 1 ? 'יש טופס אחד שעוד לא אושר' : 'יש ' + open + ' טפסים שעוד לא אושרו') +
+    ' — הם לא יישמרו. טפסים שאושרו כבר שמורים.';
+  $('#newConfirm').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  $('#ncCancel').focus();  // ברירת המחדל: לא לאבד עבודה
+}
+function closeNewConfirm(){
+  $('#newConfirm').classList.add('hidden');
+  document.body.style.overflow = '';
+  if (ncOpener && document.body.contains(ncOpener)) ncOpener.focus();
+}
+function newConfirmKeys(e){
+  if (e.key === 'Escape') { e.preventDefault(); return closeNewConfirm(); }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    (document.activeElement === $('#ncCancel') ? $('#ncYes') : $('#ncCancel')).focus();
+  }
+}
+$('#ncCancel').onclick = closeNewConfirm;
+$('#ncYes').onclick = function(){ closeNewConfirm(); resetToUpload(); };
+$('#newConfirm').addEventListener('click', function(e){ if (e.target.id === 'newConfirm') closeNewConfirm(); });
+$('#fvNew').onclick = function(){ startNewIntake($('#fvNew')); };
+$('#xlNew').onclick = function(){ closeExportPreview(); resetToUpload(); };
+
+$('#again').onclick = function(){ startNewIntake($('#again')); };
+
+function resetToUpload(){
   clearInterval(timer);
   batch = null;
   last = null;
@@ -1690,16 +1851,28 @@ $('#again').onclick = function(){
   $('#file').value = '';
   drop.classList.remove('hidden');
   setStep(1);
-};
+  view = load('view', 'tiles') === 'table' ? 'table' : 'tiles';
+  window.scrollTo({ top: 0, behavior: calm ? 'auto' : 'smooth' });
+}
 
 /* ------------------------------------------------------------ רגע הצלחה */
+function unverifiedCount(d){
+  return d.unverified != null ? d.unverified : d.records.filter(function(r){ return !r.verified; }).length;
+}
+
+// רק אחרי שהטופס האחרון אושר ב"אישור הטופס": חגיגה, ואחריה נפתחת חלונית הייצוא לבד
+const EXPORT_AFTER_PARTY = 2000;
 function maybeCelebrate(d){
-  if (processing || celebrated || !d.records.length || d.review_total !== 0) return;
+  if (processing || celebrated || !d.records.length || d.review_total !== 0 || unverifiedCount(d) !== 0) return;
   if (!d.records.some(function(r){ return !r.error; })) return;
   celebrated = true;
   $('#download').classList.add('ready');
-  toast('🎉 כל ' + d.records.length + ' הטפסים מוכנים לייצוא', { big: true, ms: 5000 });
-  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  toast('🎉 כל ' + d.records.length + ' הטפסים אושרו — מוכנים לייצוא', { big: true, ms: 5000 });
+  const me = batch;
+  setTimeout(function(){
+    if (me === batch && !$('#download').disabled && $('#xlPreview').classList.contains('hidden')) openExportPreview($('#download'));
+  }, calm ? 300 : EXPORT_AFTER_PARTY);
+  if (calm) return;
   const party = $('#party');
   const colors = ['#0068f5', '#0c306a', '#00a8cc', '#c2d96b', '#48c0d8'];
   party.innerHTML = Array.from({ length: 46 }, function(_, i){

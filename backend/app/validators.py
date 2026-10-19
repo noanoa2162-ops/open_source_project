@@ -45,6 +45,8 @@ REASON_TEXT = {
     "central_is_commitment": "אותו מספר גם במרכזי וגם בהתחייבות — לוודא",
     "id_is_other_number": "הת\"ז זהה למספר אחר בטופס — לוודא",
     "not_on_form": "השדה לא נמצא בטופס — לאשר כריק או למלא",
+    "commitment_from_sticker": "נמצא לפי מדבקת הטופס, בלי כיתוב לידו — לוודא",
+    "commitment_like_central": "נראה כמו מספר מרכזי (6 ספרות, 93xxxx–94xxxx) — לוודא",
     "names_read_twice_same": "השם נקרא פעמיים (גם מתקריב) — אותה קריאה, עדיין לוודא",
     "names_two_readings": "שתי קריאות שונות של השם (הדף והתקריב) — לבחור",
 }
@@ -121,6 +123,8 @@ def _check_digits(field: ExtractedField, value: str, key: str) -> None:
         field.flag("central_length")
     if key == "commitment_numbers" and len(value) < MIN_COMMITMENT_LENGTH:
         field.flag("commitment_too_short")
+    if key == "commitment_numbers" and len(value) == 6 and value[:2] in ("93", "94"):
+        field.flag("commitment_like_central")  # נראה כמו מדבקת "מרכזי"
     if key == "national_id":
         if len(value) != 9:
             field.flag("id_length")

@@ -39,7 +39,7 @@ from app.models import (
     Region,
     SourceFile,
 )
-from app.pages import render_pages, turn_note, turn_upside_down
+from app.pages import count_pages, render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
 from app.providers.reading import PROMPT_VERSION, NameCheck, union
 from app.store import get, source_dir
@@ -514,6 +514,10 @@ def _render_all(batch_id: str, batch: Batch) -> list[Page]:
     budget = SETTINGS.max_pages_per_batch
     flattened: list[Page] = []
 
+    # כמה עמודים צפויים בסך הכול — ספירה מיידית, כדי שהמסך יראה אחוזים כבר בזמן הזיהוי
+    expected = sum(count_pages(source_dir(batch_id, s.index) / "source") for s in batch.sources if s.accepted)
+    batch.expected_pages = min(expected, budget)
+
     for source in batch.sources:
         if not source.accepted:
             continue
@@ -521,10 +525,17 @@ def _render_all(batch_id: str, batch: Batch) -> list[Page]:
             source.error = "לא עובד — נחצתה תקרת העמודים להעלאה"
             continue
         try:
+            def found(number: int, path: Path, source: SourceFile = source) -> None:
+                # כל עמוד שמוכן נספר מיד — המסך סופר 1, 2, 3 כבר בזמן הזיהוי
+                batch.pages.append({"source_index": source.index, "page_number": number,
+                                    "status": PAGE_QUEUED, "record_id": ""})
+                batch.found_pages += 1
+
             written, in_file = render_pages(
                 source_dir(batch_id, source.index) / "source",
                 source_dir(batch_id, source.index) / "pages",
                 limit=budget,
+                on_page=found,
             )
         except Exception as exc:  # noqa: BLE001 - חוסן: קובץ פגום לא מפיל את השאר
             source.error = f"לא ניתן לפתוח את הקובץ ({type(exc).__name__})"

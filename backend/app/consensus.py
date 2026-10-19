@@ -91,6 +91,11 @@ def combine(record: FormRecord, reading: RawExtraction) -> None:
         elif not field.values:
             field.flag("not_on_form")  # הקורא חיפש ולא מצא — "לא קיים בטופס"
 
+    # מספר התחייבות שנלקח ממדבקת הטופס, בלי כיתוב לידו — תמיד לבדיקה של אדם (הנחיית צוות האתגר)
+    commitment = record.fields["commitment_numbers"]
+    if commitment.values and reading.context.get("commitment_found_by") == "form_sticker":
+        commitment.flag("commitment_from_sticker")
+
     if record.low_resolution:
         for key in HANDWRITING_PRONE:
             record.fields[key].flag("low_resolution")

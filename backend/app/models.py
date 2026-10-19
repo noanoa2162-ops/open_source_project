@@ -145,6 +145,8 @@ class Batch:
     error: str = ""
     created_at: str = field(default_factory=now)
     skipped_pages: int = 0  # עמודים שהושמטו בגלל תקרת העמודים
+    found_pages: int = 0  # כמה טפסים זוהו עד עכשיו — עולה תוך כדי הכנת העמודים
+    expected_pages: int = 0  # כמה עמודים צפויים בסך הכול (ספירה מיידית לפני הזיהוי) — לאחוזים
     budget_skipped_pages: int = 0  # עמודים שלא עובדו בגלל תקרת התקציב
     warnings: list[str] = field(default_factory=list)  # הודעות גלויות ברמת ההעלאה
     seconds: float = 0.0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import traceback
 from pathlib import Path
 from urllib.parse import quote
 
@@ -11,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from app import gold, pipeline, store
+from app import db, gold, pipeline, store
 from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
@@ -136,11 +137,13 @@ def read_batch(batch_id: str) -> dict:
 
 
 @app.get("/api/batches/{batch_id}/sources/{source_index}/pages/{page_number}")
-def page_image(batch_id: str, source_index: int, page_number: int) -> FileResponse:
+def page_image(batch_id: str, source_index: int, page_number: int, ink: bool = False) -> FileResponse:
     _require(batch_id)
     path = pipeline.page_image_path(batch_id, source_index, page_number)
     if not path.is_file():
         raise HTTPException(404, "העמוד לא נמצא.")
+    if ink:
+        path = ink_enhanced(path)  # גרסת "דיו" של העמוד המלא — לתקריב שגוררים. מקומי, בלי עלות
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
@@ -245,7 +248,17 @@ def verify_record(record_id: str) -> dict:
     page = pipeline.page_image_path(batch.batch_id, record.source_index, record.page_number)
     if page.is_file():
         gold.save(record, source, page)
+        try:
+            db.save_approved(record, source, page)  # נשמר לתמיד במסד הנתונים (work/forms.db)
+        except Exception:  # noqa: BLE001 - האישור במסך לא נופל בגלל שמירה
+            traceback.print_exc()
     return _serialise(batch)
+
+
+@app.get("/api/approved")
+def approved_forms() -> list[dict]:
+    """The approved forms saved in the database — read only."""
+    return db.list_approved()
 
 
 @app.patch("/api/records/{record_id}")
@@ -311,6 +324,10 @@ def export_batch(batch_id: str) -> Response:
         raise HTTPException(409, "הקריאה עוד לא הסתיימה.")
     if batch.review_total:
         raise HTTPException(409, f"יש עדיין {batch.review_total} שדות לבדיקה.")
+    # וגם כל טופס אושר במפורש ("אישור הטופס") — תיקון שדות לבדו אינו אישור
+    unverified = sum(1 for r in batch.records if not r.verified)
+    if unverified:
+        raise HTTPException(409, f"נשארו {unverified} טפסים לאישור.")
     filename = f"commitments-{batch_id}.xlsx"
     return Response(
         content=workbook_bytes(batch),
@@ -360,8 +377,11 @@ def _serialise(batch: Batch) -> dict:
         "total_pages": batch.total_pages,
         "processed_pages": batch.processed_pages,
         "skipped_pages": batch.skipped_pages,
+        "found_pages": batch.found_pages,
+        "expected_pages": batch.expected_pages,
         "budget_skipped_pages": batch.budget_skipped_pages,
         "review_total": batch.review_total,
+        "unverified": sum(1 for r in batch.records if not r.verified),
         "warnings": batch.warnings,
         "cost_usd": batch.cost_usd,
         "seconds": batch.seconds,

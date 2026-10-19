@@ -40,6 +40,7 @@ AGREE = 0.08  # כמה היחס בין שני עוגנים רשאי להיות �
 MIN_CHANGE = 0.10  # תיקון כללי רק כשההזזה ממשית (יותר מ-10%)
 # עם עוגן אחד: הציר השני רשאי לזוז עד 20% — תיבה סביב שני ערכים יחד אינה ממורכזת על אחד מהם
 SIDE_TOLERANCE = 0.20
+MODEL_PIXELS = 3_580_000  # כמה פיקסלים המודל רואה לכל היותר (נמדד ב-count_tokens: 4,780 טוקנים)
 
 # מה ידוע על מיקום כל שדה — מוצג בתקריב
 CHECKED = "verified"  # הערך נמצא בעמוד בתוך התיבה
@@ -107,10 +108,45 @@ def check_regions(record: FormRecord, image_path: Path) -> None:
         fix = _common_fix(moves) if len(moves) >= 2 else _aspect_fix(moves[0], image_path)
         if fix is not None:
             for key, field in record.fields.items():
-                if key not in anchored and field.region:
+                if key == "sending_entity" and field.region:
+                    # לוגו/כותרת: בוחרים בין שתי התיבות את זו שבאמת יושבת על דפוס
+                    moved_box = fix(field.region)
+                    if _print_share(image_path, moved_box) > _print_share(image_path, field.region):
+                        field.region, field.region_note = moved_box, MOVED
+                    continue
+                if key in anchored:
+                    # ערכים שלא נמצאו בעמוד בשדה שחלק מערכיו כן נמצא — זזים יחד עם הדף
+                    if field.value_regions and len(field.value_regions) == len(field.values):
+                        field.value_regions = [
+                            r if r is None or _holds_any(r, words, value) else fix(r)
+                            for r, value in zip(field.value_regions, field.values)
+                        ]
+                        field.region = union(field.value_regions) or field.region
+                    continue
+                if field.region:
                     field.region = fix(field.region)
                     field.value_regions = [fix(r) if r else None for r in field.value_regions]
                     field.region_note = MOVED
+
+
+def _holds_any(region: Region, words: list[Word], value: str) -> bool:
+    target = _digits(value)
+    return any(target and target in w.digits and _holds(region, w.box) for w in words)
+
+
+def _print_share(image_path: Path, region: Region) -> float:
+    """How much of the box is dark print (0–1) — a logo or a printed title is dense."""
+    try:
+        with Image.open(image_path) as page:
+            width, height = page.size
+            box = (int(region[0] * width), int(region[1] * height), int(region[2] * width), int(region[3] * height))
+            if box[2] - box[0] < 2 or box[3] - box[1] < 2:
+                return 0.0
+            gray = page.crop(box).convert("L").resize((60, 60))
+    except OSError:
+        return 0.0
+    dark = sum(1 for v in gray.getdata() if v < 110)
+    return dark / 3600
 
 
 def page_words(image_path: Path) -> list[Word]:
@@ -274,7 +310,19 @@ def _aspect_fix(move: tuple[Region, Region], image_path: Path):
         return _scaled(1.0, height / width)
     if near(rx, width / height) and abs(ry - 1) < SIDE_TOLERANCE:
         return _scaled(width / height, 1.0)
+    # המודל מדד בתמונה שהוקטנה אצלו (מעל ~3.5 מיליון פיקסלים): כל הדף מוזז באותו יחס בשני
+    # הצירים — היחס בין מה שהוא ראה למה שנשלח. מתקנים רק כשהעוגן מראה בדיוק את היחס הזה.
+    seen = _model_shrink(width, height)
+    if seen < 1 - MIN_CHANGE / 2 and abs(rx - seen) <= 0.04 and abs(ry - seen) <= 0.04:
+        return _scaled(seen, seen)
     return None
+
+
+def _model_shrink(width: int, height: int) -> float:
+    """How much smaller the model saw an image we used to send at up to 2576 px."""
+    sent = min(1.0, 2576 / max(width, height))
+    pixels = width * sent * height * sent
+    return min(1.0, (MODEL_PIXELS / pixels) ** 0.5)
 
 
 def _scaled(sx: float, sy: float):

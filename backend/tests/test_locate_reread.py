@@ -224,3 +224,40 @@ def test_no_reread_while_the_batch_is_still_reading(failed_batch):
     with pytest.raises(pipeline.RereadRefused):
         pipeline.reread("bat_rr", record.record_id)
     assert reader.calls == 1
+
+
+# ---------------------------------------------------------------- מספר התחייבות לפי הכלל של צוות האתגר
+
+
+def test_commitment_from_the_form_sticker_is_always_orange_with_a_reason():
+    from app.consensus import combine
+    from app.models import STATE_REVIEW
+    from app.providers.base import RawExtraction
+
+    record = FormRecord.empty("b", SOURCE, 1)
+    combine(record, RawExtraction(values={"commitment_numbers": ["82857"]},
+                                  legibility={"commitment_numbers": "clear"},
+                                  context={"commitment_found_by": "form_sticker"}))
+    field = record.fields["commitment_numbers"]
+    assert field.state == STATE_REVIEW and "commitment_from_sticker" in field.reasons
+
+
+def test_commitment_that_looks_like_a_central_number_is_flagged():
+    from app.validators import validate_record
+
+    record = FormRecord.empty("b", SOURCE, 1)
+    record.fields["commitment_numbers"].values = ["947468"]
+    validate_record(record)
+    assert "commitment_like_central" in record.fields["commitment_numbers"].reasons
+    other = FormRecord.empty("b", SOURCE, 1)
+    other.fields["commitment_numbers"].values = ["436702"]  # בני ציון — 6 ספרות, לא מרכזי
+    validate_record(other)
+    assert "commitment_like_central" not in other.fields["commitment_numbers"].reasons
+
+
+def test_instructions_follow_the_official_rule():
+    from app.providers.claude_vision import ClaudeExtractionProvider
+
+    text = ClaudeExtractionProvider(api_key="test")._prompt
+    assert "המספר המזהה של הטופס עצמו" in text and "commitment_found_by" in text
+    assert "אל תבחר מספר אחר\n  במקומו" not in text

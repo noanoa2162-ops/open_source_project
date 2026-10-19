@@ -55,6 +55,8 @@ class PageReading(BaseModel):
     birth_date: str | None = None
     upside_down: bool = False
     note: str = ""
+    # איך נמצא מספר ההתחייבות: label (ליד כיתוב) | form_sticker (מדבקת הטופס, בלי כיתוב) | none
+    commitment_found_by: str | None = None
 
 
 # ------------------------------------------------------------ שלב שני: שמות מתוך תקריב
@@ -185,7 +187,8 @@ def to_raw(
         legibility=legibility,
         regions=regions,
         value_regions=value_regions,
-        context=context,
+        context={**context, **({"commitment_found_by": reading.commitment_found_by.strip().lower()}
+                               if reading.commitment_found_by else {})},
         template=(reading.template or "").strip(),
         usage=usage,
         upside_down=bool(reading.upside_down),

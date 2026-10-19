@@ -65,9 +65,8 @@ def test_the_message_tells_the_reader_the_image_size(tmp_path):
     judge = cv.ClaudeExtractionProvider(api_key="test")
     judge._client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)))
     judge.extract(_page(tmp_path / "p.png", size=(1000, 1414)))
-    texts = [c["text"] for c in sent["messages"][0]["content"] if c["type"] == "text"]
-    assert "רוחב 1000" in texts[0] and "גובה 1414" in texts[0], "גודל העמוד המלא"
-    assert all("פיקסלים" in t for t in texts[:5]), "גודל כל רבע"
+    text = sent["messages"][0]["content"][-1]["text"]
+    assert "רוחב 1000" in text and "גובה 1414" in text
     assert "בפיקסלים" in judge._prompt and "0–1000" not in judge._prompt
 
 
@@ -82,7 +81,7 @@ def test_prompt_changed_so_old_answers_are_not_reused():
 def test_each_value_gets_its_own_region_and_the_field_their_union():
     reading = _reading(central_numbers=FieldReading(
         values=["947468", "947469"], legibility="clear",
-        boxes=[[0, 70, 470, 160, 520], [0, 70, 530, 160, 575]]))
+        boxes=[[70, 470, 160, 520], [70, 530, 160, 575]]))
     raw = to_raw(reading, "m", lambda b, t: cv._region_of(b, (1000, 1000)), None)
     one, two = raw.value_regions["central_numbers"]
     assert one == pytest.approx((0.07, 0.47, 0.16, 0.52)) and two == pytest.approx((0.07, 0.53, 0.16, 0.575))
@@ -269,39 +268,6 @@ def test_name_instructions_ask_for_a_deep_reading():
     assert "שלושה מעברים" in text and "כל המקומות בדף שבהם מופיע שם המטופל" in text
 
 
-# ---------------------------------------------------------------- sharp quarters
-
-
-def test_a_box_measured_in_a_quarter_lands_in_the_right_place_on_the_page():
-    content, layout = cv.page_content(_page_path_for_tiles())
-    width, height = layout.page
-    # רבע 4 = למטה משמאל: התחלתו בגובה (1-0.57) מהעמוד, ברזולוציה מלאה
-    part = next(t for t in layout.tiles if t.number == 4)
-    left, top, right, bottom = part.rect
-    assert left == 0 and right < width and top > 0 and bottom == height
-    assert part.sent == (right - left, bottom - top), "רבע נשלח בלי הקטנה"
-    region = layout.region([0, 0, part.sent[0] / 2, part.sent[1] / 2], 4)
-    assert region[0] == pytest.approx(0) and region[1] == pytest.approx(top / height)
-    assert region[3] == pytest.approx((top + (bottom - top) / 2) / height, abs=1e-3)
-    assert layout.region([10, 10, 20, 20], 7) is None, "מספר תמונה לא קיים — לא ממציאים"
-    assert layout.region([0, 0, part.sent[0] * 2, 10], 4) is None, "מחוץ לרבע"
-
-
-def test_each_value_box_carries_its_own_quarter():
-    reading = _reading(central_numbers=FieldReading(
-        values=["947468", "947469"], legibility="clear", boxes=[[1, 0, 0, 100, 50], [3, 0, 0, 100, 50]]))
-    seen = []
-    to_raw(reading, "m", lambda b, t: seen.append(t) or (0.1, 0.1, 0.2, 0.2), None)
-    assert [t for t in seen if t is not None] == [1, 3]
-
-
-def _page_path_for_tiles():
-    import tempfile
-    path = Path(tempfile.mkdtemp()) / "page.png"
-    Image.new("RGB", (2480, 3508), "white").save(path)
-    return path
-
-
 # ---------------------------------------------------------------- snapping to pen ink
 
 
@@ -340,3 +306,67 @@ def test_no_pen_ink_leaves_the_box_alone(tmp_path):
     field.region_note = "reader"
     snap_to_ink(record, _ink_page(tmp_path))
     assert field.region == (100 / 2000, 2000 / 2800, 300 / 2000, 2060 / 2800)
+
+
+# ---------------------------------------------------------------- התמונה נשלחת בגודל שהמודל רואה
+
+
+def test_large_page_is_sent_at_the_size_the_model_actually_sees(tmp_path):
+    import base64
+    import io
+
+    for size in ((3635, 2663), (2481, 3509), (1200, 1700)):
+        page = tmp_path / f"p{size[0]}.png"
+        Image.new("RGB", size, "white").save(page)
+        block, sent = cv._image_block_sized(page, "png")
+        with Image.open(io.BytesIO(base64.b64decode(block["source"]["data"]))) as image:
+            assert image.size == sent, "מה שכתוב בהודעה = מה שנשלח"
+        assert sent[0] * sent[1] <= cv.MAX_PIXELS, "מתחת לגבול — המודל לא מקטין שוב"
+        assert max(sent) <= cv.MAX_LONG_SIDE
+    small = tmp_path / "small.png"
+    Image.new("RGB", (1200, 1700), "white").save(small)
+    assert cv._image_block_sized(small, "png")[1] == (1200, 1700), "תמונה קטנה לא מוקטנת"
+
+
+def test_saved_boxes_measured_in_the_shrunk_image_are_fixed_on_the_whole_page(monkeypatch, tmp_path):
+    from app.locate import _model_shrink
+
+    page = _page(tmp_path / "wide.png", size=(3635, 2663))
+    k = _model_shrink(3635, 2663)
+    assert 0.85 < k < 0.89
+    monkeypatch.setattr(locate, "page_words", lambda _: [Word("944964", (0.246, 0.774, 0.292, 0.787))])
+    record = FormRecord.empty("b", SOURCE, 1)
+    record.fields["central_numbers"].values = ["944964"]
+    record.fields["central_numbers"].region = (0.246 * k, 0.774 * k, 0.292 * k, 0.787 * k)
+    record.fields["first_name"].values = ["ישראל"]
+    record.fields["first_name"].region = (0.55 * k, 0.66 * k, 0.6 * k, 0.69 * k)
+    check_regions(record, page)
+    assert record.fields["first_name"].region[1] == pytest.approx(0.66, abs=0.005)
+
+
+def test_a_page_whose_boxes_are_right_is_left_alone(monkeypatch, tmp_path):
+    page = _page(tmp_path / "tall.png", size=(2481, 3509))
+    monkeypatch.setattr(locate, "page_words", lambda _: [Word("945505", (0.06, 0.28, 0.14, 0.3))])
+    record = FormRecord.empty("b", SOURCE, 1)
+    record.fields["central_numbers"].values = ["945505"]
+    record.fields["central_numbers"].region = (0.05, 0.27, 0.15, 0.31)
+    record.fields["first_name"].values = ["ישראל"]
+    record.fields["first_name"].region = (0.55, 0.3, 0.6, 0.32)
+    check_regions(record, page)
+    assert record.fields["first_name"].region == (0.55, 0.3, 0.6, 0.32)
+
+
+def test_full_page_is_served_in_ink_version_for_the_draggable_close_up(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.BATCHES_DIR", tmp_path / "batches")
+    monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
+    from app.api import app
+
+    batch = Batch(batch_id="bat_ink", status="completed")
+    batch.sources.append(SOURCE)
+    _page(pipeline.page_image_path("bat_ink", 1, 1))
+    store.put(batch)
+    client = TestClient(app)
+    for query in ("", "?ink=1"):
+        res = client.get("/api/batches/bat_ink/sources/1/pages/1" + query)
+        assert res.status_code == 200 and res.headers["content-type"] == "image/png"
+    store.delete("bat_ink")
