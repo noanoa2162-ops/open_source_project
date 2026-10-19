@@ -107,7 +107,8 @@
       <div class="stage">
         <div class="tiles" id="tiles" aria-hidden="true"></div>
         <div class="veil" aria-hidden="true"></div>
-        <div class="ringbox" id="ringbox" role="status" aria-live="polite">
+        <div class="ringbox" id="ringbox">
+          <span class="sr-only" id="ringSay" role="status" aria-live="polite"></span>
           <div class="ringinner">
           <div class="ring indeterminate" id="ring">
             <svg viewBox="0 0 120 120" aria-hidden="true">
@@ -167,6 +168,7 @@
       <h3 id="resultCount"><b id="cRecords">0</b> טפסים</h3>
       <span id="cReviewChip" class="badge review"><b id="cReview">0</b> שדות לבדיקה</span>
       <span class="grow"></span>
+      <div class="meter" id="cMeter" aria-label="עלות וזמן הקליטה"></div>
       <div class="seg" role="tablist" aria-label="מצב תצוגה">
         <button role="tab" id="viewTiles" aria-selected="true">▦ אריחים</button>
         <button role="tab" id="viewTable" aria-selected="false">▤ טבלה</button>

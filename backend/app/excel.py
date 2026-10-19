@@ -137,7 +137,7 @@ def build_workbook(batch: Batch) -> Workbook:
 def _add_notice(ws, row: int, batch: Batch, *, rows: int) -> None:
     sources = len(batch.accepted_sources)
     lines = [
-        "דמו להאקתון — מיועד לטפסי הדוגמה בלבד. אין להסתמך על הקובץ ללא בדיקה.",
+        "מיועד לטפסי הדוגמה של האתגר. אין להסתמך על הקובץ ללא בדיקה אנושית.",
         f"מקור: {batch.display_name} · {sources} קבצים · {len(batch.records)} טפסים · "
         f"{rows} שורות (שורה לכל מספר התחייבות) · "
         f"{batch.review_total} שדות מסומנים לבדיקה",

@@ -35,6 +35,10 @@ class Settings:
     access_code: str = ""
     # תקרת עלות יומית לכל השרת יחד — שומרת על הקרדיט בפריסה ציבורית. 0 = בלי תקרה.
     max_daily_cost_usd: float = 0.0
+    # שער להצגת העלות בשקלים. 0 = הצגה בדולרים בלבד.
+    usd_ils_rate: float = 0.0
+    # זמן הקלדה ידנית של טופס, שנמדד בפועל (שניות). 0 = לא נמדד — לא מוצגת השוואת חיסכון.
+    manual_seconds_per_form: float = 0.0
 
     @property
     def model(self) -> str:
@@ -86,6 +90,8 @@ def load_settings() -> Settings:
         brand="neutral" if (os.environ.get("BRAND") or "moh").strip().lower() == "neutral" else "moh",
         access_code=(os.environ.get("ACCESS_CODE") or "").strip(),
         max_daily_cost_usd=float(os.environ.get("MAX_DAILY_COST_USD") or 0),
+        usd_ils_rate=float(os.environ.get("USD_ILS_RATE") or 0),
+        manual_seconds_per_form=float(os.environ.get("MANUAL_SECONDS_PER_FORM") or 0),
     )
 
 

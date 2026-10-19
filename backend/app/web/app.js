@@ -95,10 +95,6 @@ function esc(s){
     return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c];
   });
 }
-function money(usd){
-  if (usd == null) return '—';
-  return usd < 0.01 ? (usd * 100).toFixed(2) + '¢' : '$' + usd.toFixed(3);
-}
 function markUnreadable(text){
   return esc(text).replace(/\?/g, '<mark class="q" title="תו שלא נקרא">?</mark>');
 }
@@ -321,7 +317,11 @@ function drawRing(){
   $('#ringArc').style.strokeDashoffset = String(RING_C * (1 - Math.min(1, ringShown / 100)));
   $('#ringArc').style.opacity = ringShown ? '' : '0';   // בלי נקודה תקועה למעלה כשעוד אין התקדמות
   $('#ringNum').textContent = ringShown;
+  // קורא מסך: הודעה כל 10%, לא כל 40 מילישניות
+  const step = Math.floor(ringShown / 10) * 10;
+  if (step !== announced) { announced = step; $('#ringSay').textContent = 'הושלמו ' + step + ' אחוזים'; }
 }
+let announced = -1;
 
 function countTo(pct){
   ringTarget = Math.max(ringTarget, pct);  // האחוז אף פעם לא יורד
@@ -501,7 +501,42 @@ function render(d, force){
   maybeCelebrate(d);
 }
 
+/* מד עלות וזמן: כמה עלתה הקליטה, כמה זמן לקחה, ומה המודל. אמיתי בלבד — מהשרת.
+   השוואה להקלדה ידנית מוצגת רק אם נמדד זמן ידני אמיתי (MANUAL_SECONDS_PER_FORM ב-.env). */
+function clock(sec){
+  sec = Math.round(sec || 0);
+  return sec < 60 ? sec + ' שנ׳' : Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0') + ' דק׳';
+}
+function updateMeter(d){
+  const box = $('#cMeter');
+  const n = d.records.filter(function(r){ return !r.error; }).length;
+  if (!n || !box) { if (box) box.innerHTML = ''; return; }
+  const parts = [];
+  if (d.seconds) parts.push('<span title="זמן הקליטה כולו, מהעלאה ועד שהטפסים מוכנים">⏱ <b>' + clock(d.seconds) +
+    '</b> · ' + (d.seconds / n).toFixed(1) + ' שנ׳ לטופס</span>');
+  if (d.cost_usd) {
+    const per = d.cost_usd / n, rate = CONFIG && CONFIG.usd_ils;
+    parts.push('<span title="עלות המודל בפועל, לפי הטוקנים שנצרכו">עלות <b>' +
+      (rate ? (per * rate).toFixed(2) + ' ₪' : '$' + per.toFixed(3)) + '</b> לטופס' +
+      (rate ? ' <small>($' + per.toFixed(3) + ')</small>' : '') + '</span>');
+  } else if (d.cost_usd === 0 || d.cost_usd === null) {
+    parts.push('<span title="אותם דפים כבר נקראו — התשובות השמורות הוחזרו בלי קריאה חדשה">♻ <b>ללא עלות</b> · מתשובות שמורות</span>');
+  }
+  const total = n * FIELDS.length;
+  const flagged = d.records.reduce(function(s, r){ return s + (r.error ? 0 : r.review_count); }, 0);
+  parts.push('<span title="שדות שמולאו ולא סומנו לבדיקה — לא טענת נכונות">✎ <b>' + (total - flagged) + '/' + total + '</b> שדות מולאו</span>');
+  const manual = CONFIG && CONFIG.manual_seconds_per_form;
+  if (manual && d.seconds) {
+    const saved = manual * n - d.seconds;
+    if (saved > 0) parts.push('<span title="לעומת הקלדה ידנית שנמדדה: ' + manual + ' שנ׳ לטופס. לא כולל זמן הבדיקה האנושית">' +
+      '⚡ <b>' + clock(saved) + '</b> נחסכו בהקלדה</span>');
+  }
+  if (d.model) parts.push('<span class="model">' + esc(d.model) + ' · חשיבה ' + esc(d.effort || '') + '</span>');
+  box.innerHTML = parts.join('');
+}
+
 function updateChips(d){
+  updateMeter(d);
   $('#cRecords').textContent = d.records.length;
   $('#cReview').textContent = d.review_total;
   $('#cReviewChip').classList.toggle('hidden', d.review_total === 0);
@@ -668,6 +703,7 @@ tbody.addEventListener('keydown', function(e){
   const td = e.target.closest && e.target.closest('td.cell');
   if (!td || e.target.tagName === 'INPUT') return;
   if (e.key === 'Enter') { e.preventDefault(); openPop(td); }
+  else if (e.ctrlKey || e.metaKey || e.altKey) return;   // Ctrl+A / Ctrl+E נשארים של הדפדפן
   else if (e.key === 'F2' || e.code === 'KeyE') { e.preventDefault(); edit(td); }
   else if (e.code === 'KeyA') { e.preventDefault(); approveField(td.dataset.rec, td.dataset.key); }
 });
@@ -1740,7 +1776,8 @@ document.addEventListener('keydown', function(e){
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
   if (e.key === 'Escape' && zoomOpen) { e.preventDefault(); return closeZoom(); }
-  if (e.target.closest && e.target.closest('header')) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest && e.target.closest('header, .govbar, nav, .modal, .pzmodal')) return;
   const r = currentRecord();
   if (!r) return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); goForm(1); }             // מימין לשמאל: שמאלה = הבא
@@ -1786,7 +1823,7 @@ async function openExportPreview(opener){
     return '<tr class="band' + (r.form % 2) + (split ? ' split' : '') + '"><td class="rn">' + (i + 1) + '</td>' +
       r.cells.map(function(c, col){
         return '<td' + (split && col === d.commitment_column ? ' class="hl"' : '') +
-          (c.length > 30 ? ' title="' + esc(c) + '"' : '') + '><bdi>' + esc(c) + '</bdi></td>';
+          (c && c.length > 30 ? ' title="' + esc(c) + '"' : '') + '><bdi>' + esc(c) + '</bdi></td>';
       }).join('') + '</tr>';
   }).join('');
   closePop();
@@ -1935,11 +1972,13 @@ function maybeCelebrate(d){
 /* ------------------------------------------------------------ סיור קצר */
 const TOUR = [
   { art: '📄 ➜ 📊', title: 'גוררים טפסים',
-    text: 'גוררים קבצי PDF או תמונות — כמה שרוצים. כל טופס נקרא לבד ומופיע ברגע שהוא מוכן. ' },
+    text: 'גוררים קבצי PDF או תמונות — כמה שרוצים. כל טופס נקרא לבד, וכל טופס שנקרא נשמר מיד במערכת — גם אם סוגרים את הדפדפן.' },
   { art: '<span class="demo-cell n">939376</span><span class="demo-cell r">00112?344</span><span class="demo-cell g">✓ מאוחדת</span>',
     title: 'כתום = לבדוק', text: 'כתום — המנוע לא בטוח או שבדיקה אוטומטית נכשלה, והסיבה כתובה. ירוק — אדם בדק. תא רגיל — לא נמצא ספק.' },
   { art: '🔍', title: 'מעבר על תא = תקריב',
-    text: 'בטבלה: עכבר או Tab על תא מציגים תקריב של השדה. באריחים: לחיצה פותחת את הטופס — התמונה למעלה, השדות מתחת, וחצים לטופס הבא. ✓ מאשר, ✎ מתקן, ולכל פעולה יש "בטל". הייצוא לאקסל נפתח כשאין יותר שדות לבדיקה.' }
+    text: 'בטבלה: עכבר או Tab על תא מציגים תקריב של השדה. באריחים: לחיצה פותחת את הטופס — התמונה למעלה, השדות מתחת, וחצים לטופס הבא. ✓ מאשר, ✎ מתקן, ולכל פעולה יש "בטל". אחרי שכל שדה כתום טופל — "אישור הטופס".' },
+  { art: '🗂', title: 'הכול שמור במערכת',
+    text: '"רשומות במערכת" מציג כל טופס שנקלט: חיפוש לפי שם, ת״ז או מספר, סינון לפי מצב, גורם ותאריך, וייצוא ל-Excel, CSV או JSON. הייצוא של קליטה נפתח כשכל הטפסים אושרו.' }
 ];
 let tourStep = 0;
 function openTour(){ tourStep = 0; drawTour(); $('#tour').classList.remove('hidden'); $('#tourNext').focus(); }

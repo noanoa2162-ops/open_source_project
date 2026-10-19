@@ -172,6 +172,8 @@ def config() -> dict:
         "max_files": SETTINGS.max_files_per_batch,
         "sample": SAMPLE_PATH.is_file(),
         "brand": SETTINGS.brand,
+        "usd_ils": SETTINGS.usd_ils_rate,
+        "manual_seconds_per_form": SETTINGS.manual_seconds_per_form,
         "fields": [
             {"key": f.key, "label": f.label_he, "multi": f.multi, "hint": f.hint_he}
             for f in FIELDS

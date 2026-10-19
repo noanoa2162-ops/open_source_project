@@ -14,7 +14,7 @@ PORT = 8000
 
 def run() -> None:
     url = f"http://{HOST}:{PORT}"
-    print(f"\n  טופס למידע — דמו להאקתון")
+    print("\n  טופס למידע — קליטת טפסי התחייבות")
     key = "נטען" if SETTINGS.has_key else "חסר! (ANTHROPIC_API_KEY ב-.env)"
     print(f"  קורא: {SETTINGS.reader_model} · חשיבה {SETTINGS.claude_effort}   מפתח: {key}")
     cap = SETTINGS.max_cost_per_batch_usd

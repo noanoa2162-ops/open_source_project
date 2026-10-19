@@ -1,0 +1,26 @@
+# Render Blueprint — שרת אחד מ-Docker עם דיסק קבוע. ראו DEPLOYMENT.md.
+services:
+  - type: web
+    name: tofes-lemeida
+    runtime: docker
+    plan: starter            # דיסק קבוע דורש תוכנית בתשלום (לא free)
+    region: frankfurt
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: data
+      mountPath: /data       # מסד הנתונים, הקבצים והתשובות השמורות — שורדים פריסה מחדש
+      sizeGB: 1
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false          # מוזן ידנית בלוח הבקרה של Render — לעולם לא ב-Git
+      - key: ACCESS_CODE
+        sync: false          # קוד הכניסה לשופטים
+      - key: MAX_DAILY_COST_USD
+        value: "5"
+      - key: MAX_COST_PER_BATCH_USD
+        value: "3"
+      - key: USD_ILS_RATE
+        value: "3.7"
+      - key: BRAND
+        value: moh
