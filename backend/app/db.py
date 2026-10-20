@@ -28,6 +28,7 @@ from PIL import Image
 from app.config import WORK_DIR
 from app.fields import FIELDS, MULTI_SEPARATOR
 from app.models import Batch, ExtractedField, FormRecord, SourceFile, now
+from app.cloud import enabled as cloud_enabled
 
 DB_PATH = WORK_DIR / "forms.db"
 PAGES_DIR = WORK_DIR / "approved_pages"
@@ -58,6 +59,9 @@ CREATE TABLE IF NOT EXISTS approved_forms (
 
 
 def _connect(path: Path | None = None) -> sqlite3.Connection:
+    if cloud_enabled() and path is None:
+        from app.cloud.postgres import Connection
+        return Connection()
     path = path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -82,6 +86,9 @@ def save_approved(record: FormRecord, source: SourceFile, page_png: Path,
     pages_dir.mkdir(parents=True, exist_ok=True)
     image = pages_dir / f"{key}.png"
     shutil.copyfile(page_png, image)
+    if cloud_enabled():
+        from app.cloud.storage import put
+        put(image)
 
     values = {k: " | ".join(record.fields[k].values) for k in TEXT_FIELDS}
     values.update({k: json.dumps(record.fields[k].values, ensure_ascii=False) for k in LIST_FIELDS})
@@ -96,10 +103,9 @@ def save_approved(record: FormRecord, source: SourceFile, page_png: Path,
     marks = ", ".join(f":{c}" for c in row)
     # אישור חוזר של אותו טופס: מעדכנים את השורה, ושומרים את מועד האישור הראשון
     updates = ", ".join(f"{c} = excluded.{c}" for c in row if c not in ("form_key", "approved_at"))
-    with _LOCK, _connect(path) as conn:
+    with _LOCK, _rows_conn(path) as conn:
         conn.execute(f"INSERT INTO approved_forms ({columns}) VALUES ({marks}) "
                      f"ON CONFLICT(form_key) DO UPDATE SET {updates}", row)
-    with _LOCK, _rows_conn(path) as conn:
         # אותו טופס מקובץ אחר (PDF/תמונה) — הגרסה הקודמת נמחקת; נשארת רק האחרונה (החלטת נועה, 20/10/2026)
         older = [f["form_key"] for f in _same(conn, record.fields["commitment_numbers"].values,
                                                record.fields["national_id"].values, exclude=key)]
@@ -107,7 +113,7 @@ def save_approved(record: FormRecord, source: SourceFile, page_png: Path,
         _save_rows(conn, key, record, source, image)
     for old_image in images:
         if old_image and Path(old_image) != image:
-            Path(old_image).unlink(missing_ok=True)
+            _remove_image(Path(old_image))
     return key
 
 
@@ -169,6 +175,8 @@ _PREPARED: set[str] = set()
 
 def _rows_conn(path: Path | None = None) -> sqlite3.Connection:
     conn = _connect(path)
+    if cloud_enabled() and path is None:
+        return conn
     conn.executescript(_ROWS_SCHEMA)
     where = str(path or DB_PATH)
     if where not in _PREPARED:
@@ -431,7 +439,11 @@ def load_batch(batch_id: str, path: Path | None = None) -> tuple[Batch, dict[str
         batch.records.append(record)
         batch.pages.append({"source_index": record.source_index, "page_number": record.page_number,
                             "status": "done", "record_id": record.record_id})
-        images[record.record_id] = Path(row["page_image"])
+        image = Path(row["page_image"])
+        if cloud_enabled():
+            from app.cloud.storage import ensure
+            ensure(image)
+        images[record.record_id] = image
     batch.sources.sort(key=lambda s: s.index)
     batch.records.sort(key=lambda r: (r.source_index, r.page_number))
     batch.total_pages = batch.processed_pages = batch.found_pages = len(batch.records)
@@ -467,7 +479,7 @@ def delete_form(key: str, path: Path | None = None) -> dict | None:
         return None
     for image in {*images, row["page_image"]}:
         if image:
-            Path(image).unlink(missing_ok=True)
+            _remove_image(Path(image))
     return dict(row)
 
 
@@ -502,8 +514,18 @@ CREATE INDEX IF NOT EXISTS pending_forms_batch ON pending_forms (batch_id);
 
 def _pending_conn(path: Path | None = None) -> sqlite3.Connection:
     conn = _rows_conn(path)
+    if cloud_enabled() and path is None:
+        return conn
     conn.executescript(_PENDING_SCHEMA)
     return conn
+
+
+def _remove_image(path: Path):
+    if cloud_enabled():
+        from app.cloud.storage import remove
+        remove(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def park(batch: Batch, page_of, path: Path | None = None) -> int:

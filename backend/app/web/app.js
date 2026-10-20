@@ -211,6 +211,30 @@ async function upload(fileList){
   const body = new FormData();
   files.forEach(function(f){ body.append('files', f); });
   try {
+    if (!CONFIG) throw new Error('ההגדרות עדיין נטענות. נסו שוב בעוד רגע.');
+    if (CONFIG.cloud_uploads) {
+      const prepared = await fetch('/api/uploads', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({files: files.map(function(f){ return {name: f.name, size: f.size}; })})
+      });
+      const tickets = await prepared.json();
+      if (!prepared.ok) throw new Error(typeof tickets.detail === 'string' ? tickets.detail : 'פרטי הקבצים אינם תקינים');
+      for (let i = 0; i < files.length; i++) {
+        const data = new FormData();
+        data.append('cacheControl', '0');
+        data.append('file', files[i]);
+        const sent = await fetch(tickets.files[i].url, {method: 'PUT', body: data, credentials: 'omit'});
+        if (!sent.ok) throw new Error('העלאת הקובץ לאחסון נכשלה. אפשר לבחור אותו מחדש.');
+      }
+      const ready = await fetch('/api/uploads/complete', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ids: tickets.files.map(function(f){ return f.id; })})
+      });
+      const info = await ready.json();
+      if (!ready.ok) throw new Error(info.detail || 'לא ניתן להתחיל בעיבוד');
+      begin(info);
+      return;
+    }
     const res = await fetch('/api/batches', { method: 'POST', body: body });
     if (!res.ok) {
       const d = await res.json().catch(function(){ return {}; });

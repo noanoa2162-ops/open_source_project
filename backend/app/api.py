@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
 import traceback
@@ -11,12 +12,13 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from app import db, gold, halves, pipeline, store, twoforms
 from app.config import PROJECT_ROOT, SETTINGS
+from app.cloud import enabled as cloud_enabled
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
 from app.excel import preview as excel_preview, saved_csv_bytes, saved_json, saved_workbook_bytes, workbook_bytes
@@ -40,6 +42,24 @@ THUMB_WIDTH = 240
 
 app = FastAPI(title="טופס למידע", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+if cloud_enabled():
+    from app.cloud.gateway import CloudGateway
+    from app.cloud.uploads import router as upload_router
+    app.include_router(upload_router)
+    app.add_middleware(CloudGateway)
+
+
+def _image_response(path: Path, media_type: str, **kwargs):
+    if not cloud_enabled() or media_type == "image/jpeg":
+        return FileResponse(path, media_type=media_type, **kwargs)
+    # Ink/crop derivatives are generated on demand and never become persistent
+    # records. Bound their response size; the original PNG remains in Storage.
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        image.thumbnail((2400, 2400))
+        output = io.BytesIO()
+        image.save(output, "JPEG", quality=85)
+    return Response(output.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -60,6 +80,7 @@ def config() -> dict:
         "max_pages": SETTINGS.max_pages_per_batch,
         "max_files": SETTINGS.max_files_per_batch,
         "sample": SAMPLE_PATH.is_file(),
+        "cloud_uploads": cloud_enabled(),
         "brand": SETTINGS.brand,
         "fields": [
             {"key": f.key, "label": f.label_he, "multi": f.multi, "hint": f.hint_he}
@@ -144,14 +165,21 @@ def read_batch(batch_id: str) -> dict:
 
 
 @app.get("/api/batches/{batch_id}/sources/{source_index}/pages/{page_number}")
-def page_image(batch_id: str, source_index: int, page_number: int, ink: bool = False) -> FileResponse:
+def page_image(batch_id: str, source_index: int, page_number: int, ink: bool = False) -> Response:
     _require(batch_id)
+    if cloud_enabled() and not ink:
+        from app.cloud.storage import signed_download
+        path = store.source_dir(batch_id, source_index) / "pages" / f"page-{page_number:03d}.png"
+        url = signed_download(path)
+        if not url:
+            raise HTTPException(404, "העמוד לא נמצא.")
+        return RedirectResponse(url, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
     path = pipeline.page_image_path(batch_id, source_index, page_number)
     if not path.is_file():
         raise HTTPException(404, "העמוד לא נמצא.")
     if ink:
         path = ink_enhanced(path)  # גרסת "דיו" של העמוד המלא — לתקריב שגוררים. מקומי, בלי עלות
-    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+    return _image_response(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/batches/{batch_id}/sources/{source_index}/pages/{page_number}/thumb")
@@ -178,7 +206,7 @@ def field_crop(
     field_key: str,
     ink: bool = False,
     i: int | None = None,
-) -> FileResponse:
+) -> Response:
     """The enlarged cut-out of one field, for the lower half of the split panel."""
     batch = _require(batch_id)
     if field_key not in FIELDS_BY_KEY and field_key != FULL_NAME:
@@ -210,7 +238,7 @@ def field_crop(
         # אותה הגדלה מגרסת "דיו מודגש": בלי מרקרים, כתב היד שחור. מקומי, בלי עלות.
         page = ink_enhanced(page)
         target = target.with_name(target.stem + ".ink.png")
-    return FileResponse(
+    return _image_response(
         crop_field(page, region, target), media_type="image/png", headers={"Cache-Control": "no-store"}
     )
 
@@ -334,7 +362,11 @@ def verify_record(record_id: str, payload: dict | None = None) -> dict:
             db.save_approved(record, source, page)  # נשמר לתמיד במסד הנתונים (work/forms.db)
             db.unpark(record.record_id, page)  # אושר — כבר לא ממתין
         except Exception:  # noqa: BLE001 - האישור במסך לא נופל בגלל שמירה
+            if cloud_enabled():
+                raise  # CloudGateway rolls back and never returns a false success.
             traceback.print_exc()
+    elif cloud_enabled():
+        raise HTTPException(410, "תמונת הטופס חסרה. לא ניתן לשמור אישור.")
     _changed(batch, record)
     return _serialise(batch)
 
@@ -352,6 +384,8 @@ def park_batch(batch_id: str) -> dict:
 @app.on_event("shutdown")
 def park_everything() -> None:
     """The server is closing (the computer shuts down): nothing unapproved is lost."""
+    if cloud_enabled():
+        return  # Snapshots and pending forms are committed by the durable worker.
     for batch in store.all_batches():
         pipeline.park_batch(batch)
 

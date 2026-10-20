@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["fra1"],
+  "daemons": {
+    "document-worker": {
+      "root": ".",
+      "entrypoint": "Dockerfile.worker",
+      "instances": {"fra1": 1},
+      "terminationGracePeriodSeconds": 300
+    }
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,7 +86,11 @@ def load_settings() -> Settings:
 
 SETTINGS = load_settings()
 
-DATA_DIR = Path(os.environ["DATA_DIR"]).expanduser().resolve() if os.environ.get("DATA_DIR") else PROJECT_ROOT
+DATA_DIR = (
+    Path(tempfile.gettempdir()) / "tofes-cloud"
+    if os.environ.get("CLOUD_MODE") == "1"
+    else Path(os.environ["DATA_DIR"]).expanduser().resolve() if os.environ.get("DATA_DIR") else PROJECT_ROOT
+)
 WORK_DIR = DATA_DIR / "work"
 BATCHES_DIR = WORK_DIR / "batches"
 GOLD_DIR = DATA_DIR / "evaluation" / "gold"

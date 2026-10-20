@@ -45,7 +45,14 @@ from app.pages import count_pages, render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
 from app.providers.reading import PROMPT_VERSION, NameCheck, union
 from app.store import get, source_dir
+from app.cloud import enabled as cloud_enabled
 from app.validators import validate_record
+
+
+def checkpoint(batch: Batch) -> None:
+    if cloud_enabled():
+        from app.cloud.state import checkpoint as save_checkpoint
+        save_checkpoint(batch)
 
 Page = tuple[SourceFile, int, Path]
 
@@ -63,7 +70,9 @@ def build_reader() -> tuple[ExtractionProvider | None, str]:
     from app.providers.claude_vision import ClaudeExtractionProvider
 
     try:
-        return ClaudeExtractionProvider(model=SETTINGS.reader_model), ""
+        return ClaudeExtractionProvider(
+            model=SETTINGS.reader_model, api_key=SETTINGS.anthropic_api_key, effort=SETTINGS.claude_effort
+        ), ""
     except ExtractionError as exc:
         return None, str(exc)
 
@@ -91,6 +100,14 @@ class Reader:
 
 
 def start(batch_id: str) -> None:
+    if cloud_enabled():
+        from app.cloud import state, storage
+        batch = get(batch_id)
+        if batch is None:
+            raise ValueError("Batch not found")
+        storage.flush()
+        state.enqueue(batch)
+        return
     threading.Thread(target=_run, args=(batch_id,), daemon=True).start()
 
 
@@ -104,6 +121,8 @@ def _run(batch_id: str) -> None:
         batch.status = "failed"
         batch.error = "העיבוד נכשל. פרטים בלוג השרת."
         traceback.print_exc()
+    finally:
+        checkpoint(batch)
 
 
 def _process(batch_id: str) -> None:
@@ -119,6 +138,7 @@ def _process(batch_id: str) -> None:
         {"source_index": s.index, "page_number": n, "status": PAGE_QUEUED, "record_id": ""}
         for s, n, _ in pages
     ]
+    checkpoint(batch)
     if not pages:
         batch.status = "failed"
         batch.error = _why_nothing_to_do(batch.sources)
@@ -204,6 +224,7 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
             batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
             status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
             batch.processed_pages += 1
+            checkpoint(batch)
 
     # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
     order = {id(record): i for i, record in enumerate(results) if record is not None}
@@ -415,7 +436,11 @@ def reread(batch_id: str, record_id: str) -> None:
         if page is not None:
             page["status"] = PAGE_READING
         old.error = "קורא שוב…"
-    threading.Thread(target=_reread_run, args=(batch, index, old, page), daemon=True).start()
+    if cloud_enabled():
+        from app.cloud import state
+        state.enqueue(batch, kind="reread", record_id=record_id)
+    else:
+        threading.Thread(target=_reread_run, args=(batch, index, old, page), daemon=True).start()
 
 
 def _reread_run(batch: Batch, index: int, old: FormRecord, page: dict | None) -> None:
@@ -533,6 +558,9 @@ def _save(key: tuple, reading: RawExtraction) -> None:
 def _load_saved(key: tuple) -> RawExtraction | None:
     """The answer saved for this key, or None — a damaged file is simply a miss."""
     path = _saved_path(key)
+    if cloud_enabled():
+        from app.cloud.storage import ensure
+        ensure(path)
     if not path.is_file():
         return None
     try:
@@ -643,12 +671,18 @@ def park_batch(batch: Batch) -> int:
 
         return db.park(batch, lambda r: page_image_path(batch.batch_id, r.source_index, r.page_number))
     except Exception:  # noqa: BLE001
+        if cloud_enabled():
+            raise
         traceback.print_exc()
         return 0
 
 
 def page_image_path(batch_id: str, source_index: int, page_number: int) -> Path:
-    return source_dir(batch_id, source_index) / "pages" / f"page-{page_number:03d}.png"
+    path = source_dir(batch_id, source_index) / "pages" / f"page-{page_number:03d}.png"
+    if cloud_enabled():
+        from app.cloud.storage import ensure
+        ensure(path)
+    return path
 
 
 def crop_path(batch_id: str, source_index: int, page_number: int, field_key: str) -> Path:
