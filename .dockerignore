@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+.env.*
+**/__pycache__
+.pytest_cache
+work
+evaluation
+samples
+exports
+*.xlsx
+*.key
+*.pem
+credentials*.json

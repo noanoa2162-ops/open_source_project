@@ -85,10 +85,11 @@ def load_settings() -> Settings:
 
 SETTINGS = load_settings()
 
-WORK_DIR = PROJECT_ROOT / "work"
+DATA_DIR = Path(os.environ["DATA_DIR"]).expanduser().resolve() if os.environ.get("DATA_DIR") else PROJECT_ROOT
+WORK_DIR = DATA_DIR / "work"
 BATCHES_DIR = WORK_DIR / "batches"
-GOLD_DIR = PROJECT_ROOT / "evaluation" / "gold"
-RUNS_DIR = PROJECT_ROOT / "evaluation" / "runs"
+GOLD_DIR = DATA_DIR / "evaluation" / "gold"
+RUNS_DIR = DATA_DIR / "evaluation" / "runs"
 
 # מחירים בדולר למיליון טוקנים (קלט, פלט), ממחירון ה-API של Anthropic. להצגת עלות בלבד.
 # כל מודלי Claude מופיעים כאן: בסירוב, מודל גיבוי עשוי לענות במקום Opus.
