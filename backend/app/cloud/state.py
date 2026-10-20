@@ -17,7 +17,15 @@ def decode(data: dict) -> Batch:
 
     data = dict(data)
     data["sources"] = [SourceFile(**s) for s in data["sources"]]
-    record = lambda r: record_from_json(json.dumps(r))
+    # Multiple split parts point to the SAME original FormRecord. Restore that
+    # identity as well as its values: unsplit_page uses it to find both parts.
+    records = {}
+
+    def record(raw):
+        key = raw["record_id"]
+        if key not in records:
+            records[key] = record_from_json(json.dumps(raw))
+        return records[key]
     data["records"] = [record(r) for r in data["records"]]
     data["joined"] = {k: [record(r) for r in v] for k, v in data.get("joined", {}).items()}
     data["page_splits"] = {k: record(v) for k, v in data.get("page_splits", {}).items()}

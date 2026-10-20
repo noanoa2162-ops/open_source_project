@@ -6,6 +6,7 @@ No cloud account, real document, provider API key or paid model is used.
 from __future__ import annotations
 
 import io
+import dataclasses
 import os
 from urllib.parse import urlsplit
 
@@ -68,6 +69,14 @@ def test_parameters_do_not_rewrite_literals_or_values():
     assert postgres.parameters("SELECT '?' AS text, ':name', value WHERE x=? AND y=:foo") == (
         "SELECT '?' AS text, ':name', value WHERE x=%s AND y=%(foo)s"
     )
+
+
+def test_snapshot_restores_shared_original_of_split_parts():
+    batch = Batch(batch_id="bat_identity")
+    original = FormRecord.empty(batch.batch_id, SourceFile(index=1, filename="test.png"), 1)
+    batch.page_splits = {"first_part": original, "second_part": original}
+    restored = state.decode(dataclasses.asdict(batch))
+    assert restored.page_splits["first_part"] is restored.page_splits["second_part"]
 
 
 @pytest.mark.parametrize("key", ["../secret", "work/../../secret", "/etc/passwd", "work/a/../b"])
