@@ -8,6 +8,10 @@
 
 ## הרצה
 
+להכנה לענן ב־Vercel עם DB ואחסון קבועים ב־Supabase, ראו
+[הסבר הפריסה ו־Docker](CLOUD_DEPLOYMENT.md).
+מצב ענן מופעל במפורש עם `CLOUD_MODE=1`; ההוראות שלהלן מיועדות להרצה המקומית.
+
 ```powershell
 uv sync        # פעם אחת
 uv run serve   # נפתח אוטומטית בדפדפן ב-http://127.0.0.1:8000

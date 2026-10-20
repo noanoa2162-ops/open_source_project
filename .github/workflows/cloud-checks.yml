@@ -8,6 +8,7 @@ permissions:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:17
@@ -36,3 +37,19 @@ jobs:
         run: |
           docker run --rm --entrypoint python tofes-web -c "import app.api, app.cloud.worker, pypdfium2"
           docker run --rm --entrypoint tesseract tofes-worker --version
+      - name: Check authenticated HTTP server in the built image
+        run: |
+          docker run -d --name tofes-http -p 8080:80 \
+            -e APP_ORIGIN=https://test.example \
+            -e ACCESS_PASSWORD=test-password-with-more-than-24-characters \
+            -e DATABASE_URL='postgresql://test:test@localhost:5432/tofes_test?sslmode=require' \
+            -e SUPABASE_URL=https://test.supabase.co \
+            -e SUPABASE_SERVICE_ROLE_KEY=test-only tofes-web
+          for attempt in {1..30}; do
+            if curl -s -o /dev/null http://localhost:8080/; then break; fi
+            sleep 1
+          done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/pending)" = 401
+          curl -fsS -u demo:test-password-with-more-than-24-characters \
+            http://localhost:8080/api/config | python -c 'import sys,json; assert json.load(sys.stdin)["cloud_uploads"] is True'
+          docker stop tofes-http

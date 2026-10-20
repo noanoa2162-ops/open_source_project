@@ -11,6 +11,7 @@ import os
 from urllib.parse import urlsplit
 
 import pytest
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -77,6 +78,41 @@ def test_snapshot_restores_shared_original_of_split_parts():
     batch.page_splits = {"first_part": original, "second_part": original}
     restored = state.decode(dataclasses.asdict(batch))
     assert restored.page_splits["first_part"] is restored.page_splits["second_part"]
+
+
+def test_real_storage_sdk_authentication_and_signed_upload_contract(cloud_settings, monkeypatch):
+    seen = []
+
+    def transport(request):
+        assert request.headers["authorization"] == "Bearer test-only"
+        assert request.headers["apikey"] == "test-only"
+        seen.append(request.url.path)
+        if request.url.path.endswith("/bucket/documents"):
+            return httpx.Response(200, json={
+                "id": "documents", "name": "documents", "owner": "",
+                "public": False, "file_size_limit": 41943040, "allowed_mime_types": None,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })
+        if "/upload/sign/" in request.url.path:
+            return httpx.Response(200, json={"url": "/object/upload/sign/documents/uploads/test?token=signed"})
+        if request.method == "POST":
+            assert b"synthetic bytes" in request.content
+            return httpx.Response(200, json={"Key": "documents/objects/test", "Id": "test"})
+        return httpx.Response(200, content=b"synthetic bytes")
+
+    client = httpx.Client(transport=httpx.MockTransport(transport))
+    monkeypatch.setattr(storage.httpx, "Client", lambda **kwargs: client)
+    storage.bucket.cache_clear()
+    try:
+        handle = storage.bucket()
+        signed = handle.create_signed_upload_url("uploads/test")
+        assert signed["signed_url"] == "https://test.supabase.co/storage/v1/object/upload/sign/documents/uploads/test?token=signed"
+        handle.upload("objects/test", b"synthetic bytes", {"content-type": "application/octet-stream", "upsert": "true"})
+        assert handle.download("objects/test") == b"synthetic bytes"
+        assert len(seen) == 4
+    finally:
+        storage.bucket.cache_clear()
+        client.close()
 
 
 @pytest.mark.parametrize("key", ["../secret", "work/../../secret", "/etc/passwd", "work/a/../b"])
@@ -213,6 +249,23 @@ def test_failed_approval_rolls_back_sql_and_snapshot(cloud, monkeypatch):
     assert response.status_code == 503
     assert not state.get(batch.batch_id).records[0].verified
     assert db.list_approved() == []
+    with postgres.writer_lock():
+        storage.collect_garbage()
+        with postgres.connect() as conn:
+            references = {r["object_key"] for r in conn.execute("SELECT object_key FROM artifacts").fetchall()}
+    assert set(bucket.objects) == references
+
+
+def test_saved_form_reopens_from_database_after_batch_is_deleted(cloud):
+    client, bucket = cloud
+    batch, record = seeded()
+    assert client.post(f"/api/records/{record.record_id}/verify").status_code == 200
+    key = db.list_rows(start="2000-01-01", end="2100-01-01")["rows"][0]["form_key"]
+    assert client.delete(f"/api/batches/{batch.batch_id}").status_code == 200
+    result = client.post(f"/api/saved/{key}/open")
+    assert result.status_code == 200, result.text
+    assert result.json()["records"][0]["verified"]
+    assert client.get(f"/api/batches/{batch.batch_id}/sources/1/pages/1", follow_redirects=False).status_code == 307
 
 
 def test_manual_split_survives_cold_restart_and_undo(cloud):
