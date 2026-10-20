@@ -29,3 +29,21 @@ def _isolated_database(tmp_path, monkeypatch):
     """Approved forms go to a temporary database, never to work/forms.db."""
     monkeypatch.setattr("app.db.DB_PATH", tmp_path / "forms.db")
     monkeypatch.setattr("app.db.PAGES_DIR", tmp_path / "approved_pages")
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_model(monkeypatch):
+    """No test may call the paid model (Noa: "לא להוציא כסף בכלל"). A test that needs a
+    reader sets its own stand-in; anything else that reaches the model fails loudly."""
+    import anthropic
+
+    real = anthropic.Anthropic
+
+    def offline(*args, **kwargs):
+        # כל לקוח אמיתי פונה לפורט סגור במחשב — בקשה נכשלת מיד ולא מגיעה ל-Anthropic.
+        # בדיקות שמחליפות את החיבור במדומה (‎_client) ממשיכות לעבוד כרגיל.
+        kwargs["base_url"] = "http://127.0.0.1:9"
+        kwargs["max_retries"] = 0
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(anthropic, "Anthropic", offline)

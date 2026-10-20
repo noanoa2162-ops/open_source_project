@@ -465,36 +465,16 @@ def test_holdout_is_deterministic_and_about_a_third():
 # ------------------------------------------------------------- evaluate
 
 
-def test_evaluation_counts_a_silent_error(tmp_path, monkeypatch):
-    from app.evaluate import Config, run_config
+def test_evaluation_counts_a_silent_error(tmp_path):
+    from app.evaluate import Config, Score, score_form
 
     form = gold.GoldForm("k", png(tmp_path / "p.png"), "f.pdf", 1, "", {"commitment_numbers": ["730578626"]}, False)
     wrong = Judge("a", reading("a", commitment_numbers=["87250"]))
-    monkeypatch.setattr(Config, "make", lambda self: wrong)
-    dev, hold, details = run_config(Config("x", "test", "high"), [form], parallel=1)
-    assert dev.fields["commitment_numbers"].silent == 1, "ערך שגוי בלי כתום — זה בדיוק מה שנמדד"
-    assert dev.errors[0]["field"] == "commitment_numbers"
-
-
-def test_ambiguous_field_counts_orange_as_right_and_never_as_silent_error(tmp_path, monkeypatch):
-    from app.evaluate import Config, run_config
-
-    form = gold.GoldForm("k", png(tmp_path / "p.png"), "f.pdf", 1, "",
-                         {"commitment_numbers": ["1?001"]}, False, ambiguous=("commitment_numbers",))
-    sure = Judge("a", reading("a", commitment_numbers=["14001"]))
-    monkeypatch.setattr(Config, "make", lambda self: sure)
-    dev, _, _ = run_config(Config("x", "test", "high"), [form], parallel=1)
-    field = dev.fields["commitment_numbers"]
-    assert field.silent == 0 and field.ambiguous_unflagged + field.ambiguous_flagged == 1
-
-
-def test_config_codes_map_to_model_and_effort():
-    from app.evaluate import parse_config
-
-    assert (parse_config("sonnet-medium").model, parse_config("sonnet-medium").effort) == ("claude-sonnet-5-5", "medium")
-    assert parse_config("haiku-high").model == "claude-haiku-5-5"
-    with pytest.raises(ValueError):
-        parse_config("gpt-high")
+    cfg = Config("X", "test", lambda: wrong, 0)
+    score = Score()
+    score_form(cfg, form, score, [])
+    assert score.silent_errors == 1, "ערך שגוי בלי כתום — זה בדיוק מה שנמדד"
+    assert score.errors[0]["field"] == "commitment_numbers"
 
 
 # --------------------------------------------------------- Gemini quotas
@@ -564,7 +544,8 @@ def _page_reading(**fields):
 
     empty = FieldReading(values=[], legibility="absent")
     reading = PageReading(template="kupah_form", **{
-        k: empty for k, spec in PageReading.model_fields.items() if spec.annotation is FieldReading
+        k: empty for k in PageReading.model_fields
+        if k not in ("template", "issue_date", "birth_date", "upside_down", "note", "commitment_found_by")
     })
     for key, value in fields.items():
         setattr(reading, key, value)
@@ -1026,7 +1007,6 @@ def test_build_reader_is_the_configured_claude_model(monkeypatch):
     from app.providers.claude_vision import ClaudeExtractionProvider
 
     monkeypatch.setattr(pipeline, "SETTINGS", _settings(reader_model="claude-opus-5-5", anthropic_api_key="k"))
-    monkeypatch.setattr("app.providers.claude_vision.SETTINGS", pipeline.SETTINGS)
     reader, problem = pipeline.build_reader()
     assert problem == "" and isinstance(reader, ClaudeExtractionProvider)
     assert reader.model == "claude-opus-5-5"
@@ -1052,13 +1032,11 @@ def test_batch_with_one_reader_keeps_sure_values_in_normal_colour(tmp_path, monk
     store.delete("bat_one")
 
 
-def test_prompt_carries_the_challenge_rules_and_form_boundaries():
+def test_prompt_v3_carries_the_challenge_rules():
     from app.providers.reading import PROMPT_NAME, load_prompt
 
     text = load_prompt("x")
-    assert PROMPT_NAME == "extract_v4"
-    for key in ("forms_on_page", "form_boxes", "continues_previous_page"):
-        assert key in text, key
+    assert PROMPT_NAME == "extract_v3"
     for rule in ("שדה שלא נמצא נשאר ריק — לא מנוחש", "שומרים את כולם", '"דגימה"',
                  '"דרישה"', "התקבל", "רשימת הגורמים השולחים המוכרים", "העמוד הזה עומד לבד"):
         assert rule in text, rule

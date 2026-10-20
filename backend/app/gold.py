@@ -30,7 +30,6 @@ class GoldForm:
     template: str
     truth: dict[str, list[str]]
     holdout: bool
-    ambiguous: tuple[str, ...] = ()
 
 
 def is_holdout(sha256: str, page_number: int) -> bool:
@@ -51,8 +50,6 @@ def save(record: FormRecord, source: SourceFile, page_png: Path, root: Path | No
         "verified_at": now(),
         "holdout": is_holdout(source.sha256 or record.record_id, record.page_number),
         "fields": {key_: f.values for key_, f in record.fields.items()},
-        # שדות לא חד-משמעיים בטופס עצמו: שם התשובה הנכונה היא "כתום", לא ערך אחד
-        "ambiguous": [k for k in record.context.get("ambiguous", "").split(",") if k],
     }
     (folder / "truth.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -79,7 +76,6 @@ def load_all(root: Path | None = None) -> list[GoldForm]:
                 template=data.get("template", ""),
                 truth={k: list(v) for k, v in data.get("fields", {}).items()},
                 holdout=bool(data.get("holdout")),
-                ambiguous=tuple(data.get("ambiguous", [])),
             )
         )
     return forms

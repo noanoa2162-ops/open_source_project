@@ -173,6 +173,9 @@ def _straightened(image: Image.Image, target: Path) -> Image.Image:
 # מ-37 הדפים הישרים לא סובב. הביטחון הנמוך ביותר בדף מסובב היה 9.5 — הסף 5 משאיר מרווח.
 
 OSD_MIN_CONFIDENCE = 5.0
+# תמונה שהצלע הארוכה שלה קצרה מזה מוגדלת לפני הבדיקה. נמדד 20/10/2026 על טופס לאומית
+# 531×777 שהגיע על הצד: בגודל המקורי ביטחון 1.86 (לא סובב), מוגדל פי 2 — 11.61, ומסובב נכון.
+OSD_MIN_SIDE = 1600
 OSD_TIMEOUT_SECONDS = 30
 _OSD_ROTATE = re.compile(r"Rotate:\s*(\d+)")
 _OSD_CONFIDENCE = re.compile(r"Orientation confidence:\s*([\d.]+)")
@@ -195,10 +198,18 @@ def detect_orientation(image: Image.Image) -> tuple[int, float] | None:
     command = tesseract_command()
     if command is None:
         return None
+    probe = image.convert("L")
+    if max(probe.size) < OSD_MIN_SIDE:
+        # תמונה קטנה (צילום מסך, תמונה מוקטנת): Tesseract לא בטוח באותיות הקטנות.
+        # מגדילים רק את העותק לבדיקה — העמוד עצמו לא משתנה. עמודי PDF (~3,500) לא מגיעים לכאן.
+        scale = OSD_MIN_SIDE / max(probe.size)
+        probe = probe.resize(
+            (round(probe.width * scale), round(probe.height * scale)), Image.Resampling.LANCZOS
+        )
     handle, name = tempfile.mkstemp(suffix=".png")
     os.close(handle)
     try:
-        image.convert("L").save(name)
+        probe.save(name)
         result = subprocess.run(
             [command, name, "stdout", "--psm", "0"],
             capture_output=True, text=True, timeout=OSD_TIMEOUT_SECONDS,

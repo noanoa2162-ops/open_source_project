@@ -80,9 +80,6 @@ def combine(record: FormRecord, reading: RawExtraction) -> None:
     record.model_note = reading.note
     record.context = _context(reading)
     record.upside_down = reading.upside_down
-    record.forms_on_page = reading.forms_on_page
-    record.form_regions = list(reading.form_regions)
-    record.continues_previous = reading.continues_previous
 
     for spec in FIELDS:
         field = record.fields[spec.key]

@@ -25,7 +25,7 @@ from app.providers.base import (
     Usage,
 )
 
-PROMPT_NAME = "extract_v4"  # v3 נשאר בתיקייה לצורך השוואה; v4 = v3 + גבולות הטופס בעמוד
+PROMPT_NAME = "extract_v3"  # v2 נשאר בתיקייה לצורך השוואה
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / f"{PROMPT_NAME}.md"
 # שם + טביעת אצבע של התוכן: כל עריכה בפרומפט פוסלת תשובות שמורות ישנות.
 PROMPT_VERSION = (
@@ -57,10 +57,6 @@ class PageReading(BaseModel):
     note: str = ""
     # איך נמצא מספר ההתחייבות: label (ליד כיתוב) | form_sticker (מדבקת הטופס, בלי כיתוב) | none
     commitment_found_by: str | None = None
-    # גבולות הטופס: כמה טפסים בעמוד, תיבה לכל אחד, והאם העמוד ממשיך טופס מהעמוד הקודם
-    forms_on_page: int = 1
-    form_boxes: list[list[float]] | None = None
-    continues_previous_page: bool = False
 
 
 # ------------------------------------------------------------ שלב שני: שמות מתוך תקריב
@@ -196,7 +192,4 @@ def to_raw(
         template=(reading.template or "").strip(),
         usage=usage,
         upside_down=bool(reading.upside_down),
-        forms_on_page=max(1, int(reading.forms_on_page or 1)),
-        form_regions=[r for r in (_one(region_of, b) for b in (reading.form_boxes or [])) if r],
-        continues_previous=bool(reading.continues_previous_page),
     )

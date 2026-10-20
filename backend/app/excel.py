@@ -53,16 +53,6 @@ def record_rows(record: FormRecord) -> list[list[str]]:
     return [[*base[:column], number, *base[column + 1:]] for number in commitments]
 
 
-def page_label(record: FormRecord) -> str:
-    """"3", "3–4" for a form over two pages, "3 (טופס 2 מתוך 2)" for one of two forms on a page."""
-    label = str(record.page_number)
-    if record.extra_pages:
-        label += "–" + str(record.extra_pages[-1])
-    if record.sub_forms > 1:
-        label += f" (טופס {record.sub_form} מתוך {record.sub_forms})"
-    return label
-
-
 def record_row(record: FormRecord) -> list[str]:
     cells = [MULTI_SEPARATOR.join(record.fields[f.key].values) for f in FIELDS]
     flagged = [f for f in record.fields.values() if f.state == STATE_REVIEW]
@@ -70,7 +60,7 @@ def record_row(record: FormRecord) -> list[str]:
     return [
         *cells,
         record.source_name,
-        page_label(record),
+        str(record.page_number),
         str(len(flagged)),
         "; ".join(reasons),
     ]
@@ -147,7 +137,7 @@ def build_workbook(batch: Batch) -> Workbook:
 def _add_notice(ws, row: int, batch: Batch, *, rows: int) -> None:
     sources = len(batch.accepted_sources)
     lines = [
-        "מיועד לטפסי הדוגמה של האתגר. אין להסתמך על הקובץ ללא בדיקה אנושית.",
+        "דמו להאקתון — מיועד לטפסי הדוגמה בלבד. אין להסתמך על הקובץ ללא בדיקה.",
         f"מקור: {batch.display_name} · {sources} קבצים · {len(batch.records)} טפסים · "
         f"{rows} שורות (שורה לכל מספר התחייבות) · "
         f"{batch.review_total} שדות מסומנים לבדיקה",
@@ -168,42 +158,72 @@ def workbook_bytes(batch: Batch) -> bytes:
     return buffer.getvalue()
 
 
-RECORD_STATUS = {"approved": "מאושר", "ready": "ממתין לאישור", "review": "לבדיקה", "failed": "הקריאה נכשלה"}
+# ------------------------------------------------------------ ייצוא "רשומות במערכת"
+#
+# רק טפסים מאושרים, באותה צורה כמו הקובץ הרגיל: שורה לכל מספר התחייבות. השורות
+# מגיעות מוכנות ממסד הנתונים (db.rows_for_export).
+
+SAVED_KEYS = ("first_name", "last_name", "national_id", "central_numbers",
+              "sample_received_date", "sending_entity", "commitment_number")
+SAVED_HEADERS = [f.label_he for f in FIELDS] + ["קובץ מקור", "עמוד בקובץ", "אושר"]
 
 
-def records_workbook_bytes(rows: list[dict]) -> bytes:
-    """The records screen as it is filtered: one row per commitment number, like
-    the batch export, plus status and source. Everything as neutralised text."""
+def saved_cells(row: dict) -> list[str]:
+    return [str(row.get(k) or "") for k in SAVED_KEYS] + [
+        str(row.get("source_name") or ""), str(row.get("page_number") or ""), str(row.get("approved_local") or ""),
+    ]
+
+
+def saved_workbook_bytes(rows: list[dict], title: str) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.title = "רשומות"
+    ws.title = "טפסים מאושרים"
     ws.sheet_view.rightToLeft = True
-    head = [f.label_he for f in FIELDS] + ["מצב", "קובץ מקור", "עמוד בקובץ"]
-    widths = [14, 16, 16, 18, 20, 22, 20, 16, 30, 12]
-    for index, (label, width) in enumerate(zip(head, widths), start=1):
+    thin = Side(style="thin", color=LINE)
+
+    widths = [14, 16, 16, 18, 20, 22, 20, 30, 12, 18]
+    for index, (label, width) in enumerate(zip(SAVED_HEADERS, widths), start=1):
         cell = ws.cell(row=1, column=index, value=label)
         cell.fill = PatternFill("solid", fgColor=NAVY)
         cell.font = Font(bold=True, color="FFFFFF", size=11)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ws.column_dimensions[get_column_letter(index)].width = width
+    ws.row_dimensions[1].height = 30
     ws.freeze_panes = "A2"
-    thin = Side(style="thin", color=LINE)
-    line = 1
-    for row in rows:
-        base = [MULTI_SEPARATOR.join(row[f.key]) if f.multi else row[f.key] for f in FIELDS]
-        extra = [RECORD_STATUS.get(row["status"], row["status"]), row["source_name"], str(row["page_number"])]
-        commitments = row[COMMITMENT_KEY] or [""]
-        column = next(i for i, f in enumerate(FIELDS) if f.key == COMMITMENT_KEY)
-        for number in commitments:
-            line += 1
-            values = [*base[:column], number, *base[column + 1:], *extra]
-            for col, value in enumerate(values, start=1):
-                cell = ws.cell(row=line, column=col, value=neutralize(str(value)))
-                cell.number_format = "@"
-                cell.alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
-                cell.border = Border(bottom=thin)
-                if row["status"] in ("review", "failed") and col <= len(FIELDS):
-                    cell.fill = PatternFill("solid", fgColor=AMBER_FILL)
+
+    for row_index, row in enumerate(rows, start=2):
+        for column_index, value in enumerate(saved_cells(row), start=1):
+            cell = ws.cell(row=row_index, column=column_index, value=neutralize(value))
+            cell.number_format = "@"  # טקסט: אפסים מובילים ותאריכים נשמרים כפי שהם
+            cell.alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
+            cell.border = Border(bottom=thin)
+
+    note = ws.cell(row=len(rows) + 3, column=1, value=title)
+    note.font = Font(size=10, color="5A6B7B", italic=True)
+    note.alignment = Alignment(horizontal="right")
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+def saved_csv_bytes(rows: list[dict]) -> bytes:
+    """UTF-8 with BOM, so Excel opens the Hebrew correctly. Every value neutralised."""
+    import csv
+    import io
+
+    text = io.StringIO()
+    writer = csv.writer(text)
+    writer.writerow(SAVED_HEADERS)
+    for row in rows:
+        writer.writerow([neutralize(v) for v in saved_cells(row)])
+    return ("﻿" + text.getvalue()).encode("utf-8")
+
+
+def saved_json(rows: list[dict]) -> list[dict]:
+    """The same rows, as objects with English keys."""
+    return [
+        {**{k: row.get(k) or "" for k in SAVED_KEYS},
+         "source_name": row.get("source_name") or "", "page_number": row.get("page_number"),
+         "approved_at": row.get("approved_local") or ""}
+        for row in rows
+    ]

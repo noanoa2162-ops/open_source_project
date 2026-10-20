@@ -26,6 +26,8 @@ from PIL import Image
 from app.config import BATCHES_DIR, SETTINGS, WORK_DIR
 from app.consensus import NAME_KEYS, combine, merge_names
 from app.crops import crop_field
+from app.halves import join_halves
+from app.known import apply_known, from_saved, saved_for_page
 from app.locate import check_regions, snap_to_ink
 from app.models import (
     PAGE_DONE,
@@ -42,7 +44,7 @@ from app.models import (
 from app.pages import count_pages, render_pages, turn_note, turn_upside_down
 from app.providers.base import ExtractionError, ExtractionProvider, RawExtraction
 from app.providers.reading import PROMPT_VERSION, NameCheck, union
-from app.store import get, persist, source_dir
+from app.store import get, source_dir
 from app.validators import validate_record
 
 Page = tuple[SourceFile, int, Path]
@@ -102,24 +104,6 @@ def _run(batch_id: str) -> None:
         batch.status = "failed"
         batch.error = "העיבוד נכשל. פרטים בלוג השרת."
         traceback.print_exc()
-    finally:
-        persist(batch)
-
-
-def resume(batch: Batch) -> None:
-    """Start again a batch that was being read when the server stopped.
-
-    Its pages are read from scratch, but every page already paid for comes back
-    from the saved answers (same pixels, model and prompt) — free and identical.
-    """
-    batch.records = []
-    batch.pages = []
-    batch.processed_pages = batch.found_pages = batch.total_pages = 0
-    batch.skipped_pages = batch.budget_skipped_pages = 0
-    batch.status = "queued"
-    batch.warn("הקריאה חודשה אחרי הפעלה מחדש של השרת. טפסים שכבר נקראו חזרו מהתשובות השמורות, בלי עלות.")
-    persist(batch)
-    start(batch.batch_id)
 
 
 def _process(batch_id: str) -> None:
@@ -158,6 +142,16 @@ def _process(batch_id: str) -> None:
             batch.error = reader.retired
             return
 
+    # טופס שצולם בשני חצאים → טופס אחד. מקומי ובחינם; תקלה כאן לא מפילה את הקריאה.
+    try:
+        join_halves(batch)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    # טופס שכבר אושר מקובץ אחר (אותו מספר התחייבות ות"ז) — הערכים מהמערכת. אחרי החיבור,
+    # כדי שחצי תחתון לא יקבל שם ות"ז מהמאגר לפני שהתחבר.
+    apply_known(batch.records)
+    # עמוד עם שני טפסים — לא מפצלים לבד: המזכירה מחליטה, בכפתור, בחינם (twoforms.py, החלטת נועה 20/10/2026)
+
     _finish(batch, len(pages))
 
 
@@ -174,9 +168,9 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
     stop = threading.Event()
     spent = [0.0]
     spent_lock = threading.Lock()
-    results: list[list[FormRecord] | None] = [None] * len(pages)
+    results: list[FormRecord | None] = [None] * len(pages)
 
-    def work(index: int) -> tuple[int, list[FormRecord] | None, str]:
+    def work(index: int) -> tuple[int, FormRecord | None, str]:
         if stop.is_set() or reader.exhausted:
             return index, None, "stopped"
         with spent_lock:
@@ -186,35 +180,34 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
         source, page_number, image_path = pages[index]
         if index < len(batch.pages):
             batch.pages[index]["status"] = PAGE_READING
-        records = read_page(reader, image_path, batch.batch_id, source, page_number)
+        record = read_form(reader, image_path, batch.batch_id, source, page_number)
+        if record.upside_down:
+            show_upright(record, image_path)
         with spent_lock:
-            spent[0] += sum(r.cost_usd or 0.0 for r in records)
+            spent[0] += record.cost_usd or 0.0
         if reader.exhausted:
             # חייב להיעשות כאן ולא בתהליך הראשי, אחרת עובד כבר תפס את העמוד הבא.
             stop.set()
-        return index, records, ""
+        return index, record, ""
 
     with ThreadPoolExecutor(max_workers=SETTINGS.max_parallel_calls) as pool:
         futures = [pool.submit(work, i) for i in range(len(pages))]
         for future in as_completed(futures):
-            index, records, why = future.result()
+            index, record, why = future.result()
             status = batch.pages[index] if index < len(batch.pages) else {}
-            if records is None:
+            if record is None:
                 status["status"] = PAGE_SKIPPED
                 if why == "budget":
                     batch.budget_skipped_pages += 1
                 continue
-            results[index] = records
-            batch.records.extend(records)  # מופיע במסך מיד, לא רק בסוף
-            failed = all(r.error for r in records)
-            status.update(status=PAGE_FAILED if failed else PAGE_DONE, record_id=records[0].record_id)
+            results[index] = record
+            batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
+            status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
             batch.processed_pages += 1
-            persist(batch)  # כל טופס שנקרא נשמר מיד — עצירה באמצע לא מאבדת אותו
 
-    # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים (וכמה טפסים בעמוד — לפי הסדר בעמוד)
-    order = {id(record): (i, j) for i, group in enumerate(results) if group for j, record in enumerate(group)}
-    batch.records.sort(key=lambda record: order.get(id(record), (len(results), 0)))
-    join_continuations(batch)
+    # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
+    order = {id(record): i for i, record in enumerate(results) if record is not None}
+    batch.records.sort(key=lambda record: order.get(id(record), len(order)))
 
     if batch.budget_skipped_pages:
         batch.warn(
@@ -224,117 +217,26 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
     return results
 
 
-SPLIT_MARGIN = 0.015  # שוליים סביב כל טופס שנחתך מעמוד עם כמה טפסים
-MAX_FORMS_PER_PAGE = 6
-
-
-def read_page(
-    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int
-) -> list[FormRecord]:
-    """One page → one or more records.
-
-    Usually a page is one form. When the reader reports several separate forms
-    on the page (two forms photographed side by side), each form is cut out and
-    read on its own — one more reading per extra form, only for such pages — so
-    no record mixes two patients. Each split record is flagged for review.
-    """
-    record = read_form(reader, image_path, batch_id, source, page_number)
-    if record.upside_down:
-        show_upright(record, image_path)
-    boxes = record.form_regions[:MAX_FORMS_PER_PAGE]
-    if record.error or record.forms_on_page < 2 or len(boxes) < 2:
-        if not record.error and record.forms_on_page >= 2:
-            # המודל ראה כמה טפסים אבל לא נתן גבולות שמישים — לא מנחשים, רק מסמנים
-            record.fields["commitment_numbers"].flag("split_page")
-            record.model_note = " · ".join(filter(None, [record.model_note,
-                                                         f"בעמוד נראים {record.forms_on_page} טפסים — לוודא שהשדות מטופס אחד"]))
-        return [record]
-
-    parts: list[FormRecord] = []
-    for number, box in enumerate(boxes, start=1):
-        wide = (max(0.0, box[0] - SPLIT_MARGIN), max(0.0, box[1] - SPLIT_MARGIN),
-                min(1.0, box[2] + SPLIT_MARGIN), min(1.0, box[3] + SPLIT_MARGIN))
-        crop = _cut(image_path, wide, image_path.with_name(f"{image_path.stem}-f{number}.png"))
-        part = read_form(reader, crop, batch_id, source, page_number)
-        part.sub_form, part.sub_forms = number, len(boxes)
-        part.forms_on_page = 1
-        part.form_regions = []
-        _to_page(part, wide)
-        if not part.error:
-            part.fields["commitment_numbers"].flag("split_page")
-        parts.append(part)
-    # הקריאה של העמוד כולו (שגילתה את הגבולות) נספרת בעלות של הטופס הראשון
-    parts[0].cost_usd = (parts[0].cost_usd or 0.0) + (record.cost_usd or 0.0)
-    return parts
-
-
-def _cut(page_png: Path, box: Region, target: Path) -> Path:
-    """Exactly `box` of the page, at full resolution — no margin, no resize — so
-    positions on the cut-out map straight back to the page."""
-    with Image.open(page_png) as page:
-        w, h = page.size
-        x0, y0 = int(box[0] * w), int(box[1] * h)
-        piece = page.crop((x0, y0, max(x0 + 1, int(box[2] * w)), max(y0 + 1, int(box[3] * h))))
-        piece.save(target, format="PNG")
-    return target
-
-
-def _to_page(record: FormRecord, box: Region) -> None:
-    """Boxes measured on a cut-out → boxes on the full page, so zoom and frame work."""
-    x0, y0, x1, y1 = box
-    w, h = x1 - x0, y1 - y0
-
-    def move(r: Region | None) -> Region | None:
-        return None if r is None else (x0 + r[0] * w, y0 + r[1] * h, x0 + r[2] * w, y0 + r[3] * h)
-
-    for field in record.fields.values():
-        field.region = move(field.region)
-        field.value_regions = [move(r) for r in field.value_regions]
-
-
-def join_continuations(batch: Batch) -> None:
-    """A page that only continues the form on the previous page of the same file
-    joins that form's record instead of becoming an empty record of its own.
-
-    Only empty fields are filled from the continuation, every filled one is
-    flagged, and the page numbers are kept — nothing is merged silently."""
-    kept: list[FormRecord] = []
-    for record in batch.records:
-        previous = kept[-1] if kept else None
-        joinable = (
-            record.continues_previous and not record.error and record.sub_forms == 0
-            and previous is not None and not previous.error and previous.sub_forms == 0
-            and previous.source_index == record.source_index
-            and record.page_number == (previous.extra_pages or [previous.page_number])[-1] + 1
-        )
-        if not joinable:
-            kept.append(record)
-            continue
-        previous.extra_pages.append(record.page_number)
-        previous.cost_usd = (previous.cost_usd or 0.0) + (record.cost_usd or 0.0)
-        previous.seconds += record.seconds
-        for key, field in previous.fields.items():
-            extra = record.fields[key]
-            if extra.values and not field.values:
-                field.values = list(extra.values)
-                field.region = None  # המיקום הוא בעמוד אחר — לא מציגים תקריב שגוי
-                field.value_regions = []
-                field.reasons = [r for r in field.reasons if r not in ("missing", "not_on_form")]
-                field.flag("joined_pages")
-        for page in batch.pages:
-            if page.get("record_id") == record.record_id:
-                page["record_id"] = previous.record_id
-    batch.records = kept
-
-
 def read_form(
-    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int
+    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int,
+    use_saved: bool = True,
 ) -> FormRecord:
-    """One page → one record: the reader's answer, then the local rules."""
+    """One page → one record: the reader's answer, then the local rules.
+
+    `use_saved=False` — always the reader, never the values a person approved before.
+    The measurement needs that: it compares the reader against those very values."""
     started = time.perf_counter()
     record = FormRecord.empty(batch_id, source, page_number)
     record.low_resolution = _is_low_resolution(image_path)
     record.straightened = turn_note(image_path)
+
+    # אותו עמוד כבר אושר בעבר: הערכים מהמערכת, בלי מודל ובלי עלות
+    saved = saved_for_page(image_path) if use_saved else None
+    if saved is not None:
+        from_saved(record, saved, same_page=True)
+        record.cost_usd = 0.0
+        record.seconds = round(time.perf_counter() - started, 1)
+        return record
 
     try:
         reading = _read(reader.provider, image_path, source, page_number)
@@ -351,13 +253,42 @@ def read_form(
     record.seconds = round(time.perf_counter() - started, 1)
     usage = reading.usage
     record.cost_usd = usage.cost_usd if usage and usage.cost_usd is not None else 0.0
+    apply_reading(record, reading, image_path)
+    return record
+
+
+def apply_reading(record: FormRecord, reading: RawExtraction, image_path: Path) -> None:
+    """The reader's answer → the record, through every local rule. Shared with the
+    free measurement, so it scores exactly what the secretary would see."""
     combine(record, reading)
     check_regions(record, image_path)  # מיקומי התיבות מול העמוד עצמו — מקומי, בלי עלות
     snap_to_ink(record, image_path)  # תיבות של כתב יד — נצמדות לדיו הכחול שבטופס
     # קריאה שנייה של השם מתקריב — כבויה (18/10/2026, החלטת נועה): עלתה 3–6¢ לטופס ובמדידה
     # על 3 טפסים שיפרה אחד, לא שינתה אחד והחמירה אחד. הפונקציה נשארת: look_again_at_names.
     validate_record(record)
-    return record
+
+
+def saved_readings(image_path: Path, sha256: str = "", page_number: int = 0) -> list[tuple[str, RawExtraction]]:
+    """Every answer already paid for this page, from any version of the instructions:
+    (prompt_version, reading), newest version first when it is the current one. Free."""
+    digest = _page_digest(image_path)
+    found: list[tuple[str, RawExtraction]] = []
+    if not READ_CACHE_DIR.is_dir():
+        return found
+    for path in READ_CACHE_DIR.glob("*.json"):
+        try:
+            key = json.loads(path.read_text(encoding="utf-8")).get("key") or []
+        except (OSError, ValueError):
+            continue
+        by_page = len(key) >= 5 and key[0] == "page" and key[1] == digest
+        by_file = bool(sha256) and len(key) >= 5 and key[0] == sha256 and key[1] == page_number
+        if not (by_page or by_file):
+            continue
+        reading = _load_saved(tuple(key))
+        if reading is not None:
+            found.append((str(key[4]), reading))  # במקום 4 בשני סוגי המפתח: גרסת ההוראות
+    found.sort(key=lambda item: item[0] != PROMPT_VERSION)
+    return found
 
 
 # ------------------------------------------------------------ שלב שני: השם מתוך תקריב חד
@@ -498,18 +429,17 @@ def _reread_run(batch: Batch, index: int, old: FormRecord, page: dict | None) ->
         record = read_form(Reader(provider), image_path, batch.batch_id, source, old.page_number)
         if record.upside_down:
             show_upright(record, image_path)
+        apply_known([record])  # אם הטופס כבר אושר בעבר — הערכים מהמערכת
         record.record_id = old.record_id  # אותו טופס — המסך ממשיך לזהות אותו
     except Exception as exc:  # noqa: BLE001 - חוט רקע לא מת בשקט
         traceback.print_exc()
         old.error = f"הקריאה החוזרת נכשלה: {exc}"
     with _REREAD_LOCK:
         if record is not None:
-            record.revision = old.revision + 1
             batch.records[index] = record
         if page is not None:
             failed = record is None or bool(record.error)
             page["status"] = PAGE_FAILED if failed else PAGE_DONE
-    persist(batch)
 
 
 def show_upright(record: FormRecord, image_path: Path) -> None:
@@ -616,7 +546,6 @@ def _load_saved(key: tuple) -> RawExtraction | None:
         data["regions"] = {
             k: (tuple(v) if v is not None else None) for k, v in (data.get("regions") or {}).items()
         }
-        data["form_regions"] = [tuple(v) for v in data.get("form_regions") or [] if v]
         return RawExtraction(**data)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -702,6 +631,20 @@ def _finish(batch: Batch, total: int) -> None:
 
     batch.status = "partial" if notes else "completed"
     batch.error = ". ".join(notes)
+
+
+def park_batch(batch: Batch) -> int:
+    """Keep the upload's unapproved forms as "waiting for approval" (see db.park). Never fails
+    the caller — a storage problem is logged."""
+    if batch.status in ("queued", "processing"):
+        return 0
+    try:
+        from app import db
+
+        return db.park(batch, lambda r: page_image_path(batch.batch_id, r.source_index, r.page_number))
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return 0
 
 
 def page_image_path(batch_id: str, source_index: int, page_number: int) -> Path:

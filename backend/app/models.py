@@ -90,6 +90,7 @@ class SourceFile:
     page_count: int = 0
     error: str = ""  # קובץ פסול — נרשם כאן ואינו מפיל את השאר
     sha256: str = ""  # טביעת אצבע: אותו קובץ פעמיים לא נשלח שוב למודלים
+    joined: bool = False  # לא הועלה — תמונה שהמערכת הדביקה משני חצאים של טופס
 
     @property
     def accepted(self) -> bool:
@@ -117,35 +118,13 @@ class FormRecord:
     verified: bool = False  # המזכירה בדקה ושמרה כמאומת
     upside_down: bool = False  # המודל אמר שהדף הגיע הפוך; סובב לתצוגה בלבד
     straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
-    # גבולות הטופס. sub_form = מספר הטופס בעמוד (1..sub_forms) כשבעמוד אחד היו כמה טפסים;
-    # extra_pages = עמודים נוספים של אותו טופס (טופס רב-עמודי). שניהם מסומנים לבדיקה.
-    sub_form: int = 0
-    sub_forms: int = 0
-    extra_pages: list[int] = field(default_factory=list)
-    continues_previous: bool = False
-    forms_on_page: int = 1
-    form_regions: list[Region] = field(default_factory=list)
-    # גרסת הרשומה: עולה בכל שינוי. עדכון עם גרסה ישנה נדחה (409) — שני מסכים לא דורסים זה את זה.
-    revision: int = 0
-    created_at: str = field(default_factory=now)
-    updated_at: str = field(default_factory=now)
+    version: int = 0  # עולה בכל שינוי של אדם — עריכה ממסך ישן נדחית ולא דורסת
+    # הטופס כבר אושר בעבר: הערכים הגיעו מהמערכת ולא מהקריאה. מועד האישור השמור (UTC), או ריק
+    from_store: str = ""
 
     @property
     def review_count(self) -> int:
         return sum(1 for f in self.fields.values() if f.state == STATE_REVIEW)
-
-    @property
-    def status(self) -> str:
-        """failed | review | ready | approved — for the records screen and its filter."""
-        if self.error:
-            return "failed"
-        if self.verified:
-            return "approved"
-        return "review" if self.review_count else "ready"
-
-    def touch(self) -> None:
-        self.revision += 1
-        self.updated_at = now()
 
     @classmethod
     def empty(cls, batch_id: str, source: SourceFile, page_number: int) -> "FormRecord":
@@ -177,8 +156,12 @@ class Batch:
     seconds: float = 0.0
     # לכל דף, לפי הסדר: {source_index, page_number, status, record_id}
     pages: list[dict] = field(default_factory=list)
-    # הדפדפן שהעלה. ריק = אצווה שנוצרה בקוד (בדיקות) — בלי בעלים.
-    session_id: str = ""
+    # טופס שחובר אוטומטית משני חצאים → שתי הרשומות המקוריות, לכפתור "הפרד"
+    joined: dict[str, list[FormRecord]] = field(default_factory=dict)
+    # אחרי "הפרד": לכל אחד משני החלקים → {top, bottom, source_index}, לכפתור "חבר בחזרה"
+    split_pairs: dict[str, dict] = field(default_factory=dict)
+    # עמוד שפוצל לשני טפסים: כל חלק → הרשומה המקורית של העמוד, לכפתור "בטל פיצול"
+    page_splits: dict[str, "FormRecord"] = field(default_factory=dict)
 
     @property
     def review_total(self) -> int:
@@ -191,7 +174,8 @@ class Batch:
 
     @property
     def accepted_sources(self) -> list[SourceFile]:
-        return [s for s in self.sources if s.accepted]
+        """The files that were uploaded and accepted (not an image joined from two halves)."""
+        return [s for s in self.sources if s.accepted and not s.joined]
 
     @property
     def rejected_sources(self) -> list[SourceFile]:
