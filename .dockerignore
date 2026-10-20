@@ -1,14 +1,21 @@
-.git
-.venv
-.env
-.env.*
+# Only the runtime source and build metadata may enter the build context.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!Dockerfile
+!Dockerfile.vercel
+!Dockerfile.worker
+!backend/
+!backend/app/
+!backend/app/**
+# Local launch and measurement CLIs are not used by the cloud entrypoints.
+backend/app/main.py
+backend/app/evaluate.py
 **/__pycache__
-.pytest_cache
-work
-evaluation
-samples
-exports
-*.xlsx
-*.key
-*.pem
-credentials*.json
+**/*.pyc
+**/.env
+**/.env.*
+**/*.key
+**/*.pem
+**/credentials*.json

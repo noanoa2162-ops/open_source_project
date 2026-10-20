@@ -37,6 +37,11 @@ jobs:
         run: |
           docker run --rm --entrypoint python tofes-web -c "import app.api, app.cloud.worker, pypdfium2"
           docker run --rm --entrypoint tesseract tofes-worker --version
+      - name: Verify only runtime files are packaged
+        run: |
+          for image in tofes-web tofes-worker; do
+            docker run --rm --entrypoint python "$image" -c 'from pathlib import Path; root=Path("/app"); excluded=[".env", ".git", "backend/tests", "backend/app/main.py", "backend/app/evaluate.py", "samples", "evaluation", "work", "README.md", ".venv/bin/evaluate", ".venv/bin/serve"]; assert not any((root/p).exists() for p in excluded); required=["backend/app/api.py", "backend/app/twoforms.py", "backend/app/known.py", "backend/app/cloud/worker.py", "backend/app/prompts/extract_v3.md", "backend/app/web/app.js"]; assert all((root/p).is_file() for p in required)'
+          done
       - name: Check authenticated HTTP server in the built image
         run: |
           docker run -d --name tofes-http -p 8080:80 \
