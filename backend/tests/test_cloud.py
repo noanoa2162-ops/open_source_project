@@ -140,10 +140,8 @@ def cloud(tmp_path, monkeypatch, cloud_settings):
     app.router.routes.extend(api.app.router.routes)
     app.include_router(uploads.router)
     app.add_middleware(gateway.CloudGateway)
-    client = TestClient(
-        app, auth=("demo", cloud_settings["ACCESS_PASSWORD"]),
-        headers={"Origin": cloud_settings["APP_ORIGIN"]},
-    )
+    client = TestClient(app, headers={"Origin": cloud_settings["APP_ORIGIN"]})
+    client.auth = ("demo", cloud_settings["ACCESS_PASSWORD"])
     store._BATCHES.clear()
     storage._BASELINE.clear()
     monkeypatch.setattr(storage, "_LAST_SWEEP", 0.0)

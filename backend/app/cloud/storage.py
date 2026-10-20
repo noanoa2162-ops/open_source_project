@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 from storage3 import SyncStorageClient
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, SETTINGS
 from .postgres import connect
 
 _BASELINE: dict[str, str] = {}
@@ -35,7 +35,13 @@ def bucket():
         {"apikey": secret, "Authorization": "Bearer " + secret},
         http_client=httpx.Client(timeout=60),
     )
-    return client.from_(os.environ.get("SUPABASE_BUCKET", "documents"))
+    name = os.environ.get("SUPABASE_BUCKET", "documents")
+    details = client.get_bucket(name)
+    if details.public:
+        raise RuntimeError("Document storage must be private")
+    if not details.file_size_limit or details.file_size_limit > SETTINGS.max_upload_bytes:
+        raise RuntimeError("Set the bucket file-size limit at or below MAX_UPLOAD_BYTES")
+    return client.from_(name)
 
 
 def logical(path: Path) -> str:

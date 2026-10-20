@@ -64,7 +64,10 @@ def complete(payload: Complete):
         assigned = {r["batch_id"] for r in rows}
         if assigned != {None}:
             if len(assigned) == 1 and None not in assigned:
-                return {"batch_id": next(iter(assigned)), "accepted": len(rows), "rejected": 0}
+                batch_id = next(iter(assigned))
+                if not conn.execute("SELECT 1 FROM batches WHERE batch_id=%s", (batch_id,)).fetchone():
+                    raise HTTPException(410, "ההעלאה הזו כבר נמחקה.")
+                return {"batch_id": batch_id, "accepted": len(rows), "rejected": 0}
             raise HTTPException(409, "חלק מהקבצים כבר נשלחו לעיבוד.")
         expired = conn.execute(
             "SELECT 1 FROM uploads WHERE upload_id=ANY(%s) AND created_at < now() - interval '2 hours' LIMIT 1",
