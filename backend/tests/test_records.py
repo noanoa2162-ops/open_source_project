@@ -96,7 +96,8 @@ def test_approved_time_is_the_latest_approval(monkeypatch):
     _approve(batch.records[0])
     monkeypatch.setattr("app.db.now", lambda: "2026-10-20T09:30:00+00:00")
     _approve(batch.records[0])
-    assert [r["approved_at"] for r in db.list_rows(**RANGE)["rows"]] == ["2026-10-20T09:30:00+00:00"]
+    approval_day = {"start": "2026-10-20T00:00:00+00:00", "end": "2026-10-21T00:00:00+00:00"}
+    assert [r["approved_at"] for r in db.list_rows(**approval_day)["rows"]] == ["2026-10-20T09:30:00+00:00"]
 
 
 def test_a_fix_after_approval_replaces_the_rows():
