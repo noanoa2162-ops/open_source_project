@@ -97,8 +97,21 @@ def main():
     while not STOP.is_set():
         try:
             worked = run_once()
-        except Exception:
-            log.error("Cloud worker temporarily unavailable")
+        except Exception as exc:
+            # Report diagnostic codes only: exception messages can contain secrets.
+            reason = "unspecified"
+            message = str(exc).lower()
+            for marker, code in (
+                ("password authentication failed", "database_auth_failed"),
+                ("tenant or user not found", "database_tenant_not_found"),
+                ("connection timeout", "database_connection_timeout"),
+                ("connection refused", "database_connection_refused"),
+            ):
+                if marker in message:
+                    reason = code
+                    break
+            log.error("Cloud worker temporarily unavailable (%s, sqlstate=%s, reason=%s)",
+                      type(exc).__name__, getattr(exc, "sqlstate", None), reason)
             worked = False
         if not worked:
             STOP.wait(5)
