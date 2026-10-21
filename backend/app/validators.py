@@ -21,6 +21,8 @@ NAME_RE = re.compile(r"^[א-תA-Za-z\s\-־'׳״\".?]+$")
 CENTRAL_LENGTH = (5, 7)  # בכל הדוגמאות: 6 ספרות. רק טווח סביר — לא חוק
 MIN_COMMITMENT_LENGTH = 4  # בדוגמאות: מ-4 ספרות (2657) עד 12 — לכן רק "קצר מדי"
 MAX_RECEIVED_AGE_DAYS = 365
+# טקסט שנכתב במקום ערך: "לא ברור", "לא ניתן לזהות", "אין", "חסר", "-"… (rules.py חוסם אותו)
+PLACEHOLDER = re.compile(r"^\s*(לא(\s|$)|אין(\s|$)|חסר(\s|$)|ריק$|unknown$|n/?a$|null$|none$|[\-—–_.?\s]+$)", re.I)
 
 REASON_TEXT = {
     "missing": "השדה ריק — המודל לא מצא ערך",
@@ -53,7 +55,14 @@ REASON_TEXT = {
     "unknown_char": "בערך יש תו שלא נקרא (?) — יש לתקן לפני אישור",
     "split_page": "העמוד פוצל — לוודא שהערך שייך לטופס הזה",
     "joined_conflict": "שני חלקי הטופס נתנו ערכים שונים — לבחור",
+    "not_a_value": "נכתב טקסט במקום ערך — אם אין ערך, משאירים ריק (חסר)",
+    "breaks_rule": "הערך אינו עומד בכללי המערכת — יש לתקן לפני אישור",
+    "name_placeholder": "שם ממלא-מקום (כמו \"פלוני\") — לוודא שכך באמת כתוב בטופס",
+    "names_identical": "שם פרטי ושם משפחה זהים — לוודא שלא נקראה אותה מילה פעמיים",
 }
+# שמות ממלאי-מקום שמודל כותב כשאינו מצליח לקרוא (נצפה 21/10/2026: "פלוני" על שם שנכתב באנגלית).
+# בלי "ישראל ישראלי": כך כתוב בפועל בטפסי הדוגמה של המארגנים.
+PLACEHOLDER_NAMES = {"פלוני", "פלונית", "אלמוני", "אלמונית", "john", "jane", "doe"}
 
 
 def validate_record(
@@ -75,6 +84,9 @@ def validate_record(
         for value in field.values:
             if "?" in value:
                 field.flag("unknown_char")  # תו שלא נקרא — אי אפשר לאשר עד שמתקנים
+            elif PLACEHOLDER.match(value):
+                field.flag("not_a_value")  # "לא ברור" במקום ערך — אי אפשר לאשר (rules.py)
+                continue
             if spec.kind == "digits":
                 _check_digits(field, value, key)
             elif spec.kind == "date":
@@ -82,6 +94,7 @@ def validate_record(
             elif key in ("first_name", "last_name"):
                 _check_name(field, value)
 
+    _check_names_together(record)
     _check_sender(record.fields["sending_entity"])
     _check_received_date(record, today or date.today())
     _check_numbers_across_fields(record)
@@ -157,6 +170,19 @@ def _check_name(field: ExtractedField, value: str) -> None:
     letters = [c for c in value if c.isalpha()]
     if len(letters) < 2 and "?" not in value:
         field.flag("name_too_short")
+
+
+def _check_names_together(record: FormRecord) -> None:
+    """A stand-in name, or the same word as first and last name, is usually a guess or one word
+    read twice — always orange, with the reason. The value itself is never changed."""
+    first, last = record.fields["first_name"], record.fields["last_name"]
+    for field in (first, last):
+        if any(word.lower() in PLACEHOLDER_NAMES for value in field.values for word in value.split()):
+            field.flag("name_placeholder")
+    same = {v.strip() for v in first.values} & {v.strip() for v in last.values}
+    if same - {""}:
+        first.flag("names_identical")
+        last.flag("names_identical")
 
 
 def _check_numbers_across_fields(record: FormRecord) -> None:

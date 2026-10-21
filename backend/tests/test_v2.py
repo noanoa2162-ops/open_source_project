@@ -145,7 +145,7 @@ def test_differences_that_are_not_differences_still_agree(key, a, b):
 
 def test_normalization_never_changes_a_digit():
     assert normalize("national_id", "0012") == "0012"
-    assert normalize("national_id", "001122344") != normalize("national_id", "001122334")
+    assert normalize("national_id", "011223344") != normalize("national_id", "001122334")
 
 
 def test_sender_is_shown_by_its_canonical_name():
@@ -342,7 +342,7 @@ def api(tmp_path, monkeypatch):
     page.parent.mkdir(parents=True, exist_ok=True)
     png(page, size=(1000, 1400))
     record = record_from(
-        reading("a", regions={"national_id": (0.4, 0.4, 0.6, 0.45)}, national_id=["001122344"],
+        reading("a", regions={"national_id": (0.4, 0.4, 0.6, 0.45)}, national_id=["011223344"],
                 commitment_numbers=["730578626"]),
         reading("b", national_id=["00112?344"], commitment_numbers=["730578626"]),
     )
@@ -358,9 +358,9 @@ def test_api_serves_values_and_crop_box(api):
     client, record = api
     data = client.get("/api/batches/bat_api").json()
     field = data["records"][0]["fields"]["national_id"]
-    assert field["values"] == ["001122344"]
+    assert field["values"] == ["011223344"]
     assert field["crop_box"] is not None
-    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note", "can_undo"}
+    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note", "can_undo", "blocked", "help"}
 
 
 def test_api_crop_endpoint(api):
@@ -392,7 +392,7 @@ def test_verify_is_refused_while_a_field_is_orange(api):
 
 def test_verify_saves_an_answer_key_entry(api, tmp_path):
     client, record = api
-    client.patch(f"/api/records/{record.record_id}", json={"field": "national_id", "values": ["001122344"]})
+    client.patch(f"/api/records/{record.record_id}", json={"field": "national_id", "values": ["011223344"]})
     _approve_open_fields(client, record)
     res = client.post(f"/api/records/{record.record_id}/verify")
     assert res.status_code == 200
@@ -400,7 +400,7 @@ def test_verify_saves_an_answer_key_entry(api, tmp_path):
 
     forms = gold.load_all(tmp_path / "gold")
     assert len(forms) == 1
-    assert forms[0].truth["national_id"] == ["001122344"]
+    assert forms[0].truth["national_id"] == ["011223344"]
     assert forms[0].page_png.is_file()
 
 
@@ -1286,11 +1286,11 @@ def test_form_without_or_with_one_commitment_is_one_row():
     assert ws.cell(4, col).value in (None, "")
 
 
-def test_notice_counts_forms_and_rows():
+def test_the_sheet_is_only_the_table():
+    """No notes under the table (Noa, 22/10/2026): a header row and one row per commitment number."""
     record = one_reader(reading("claude-opus-5-5", commitment_numbers=["1", "2", "3"]))
     ws, _ = _sheet(record)
-    texts = [ws.cell(r, 1).value or "" for r in range(1, ws.max_row + 1)]
-    assert any("1 טפסים" in t and "3 שורות" in t for t in texts)
+    assert ws.max_row == 1 + 3
 
 
 # ---------- 16/10/2026: a page already read is free again, whatever file it comes in
@@ -1586,13 +1586,20 @@ def test_no_sample_button_without_a_sample_file(monkeypatch, tmp_path):
 
 
 def test_index_serves_split_static_files():
+    import re
+
     from app import api as api_module
 
     client = TestClient(api_module.app)
     html = client.get("/").text
-    assert "/static/app.css?v=" in html and "/static/app.js?v=" in html and "{{v}}" not in html
-    assert client.get("/static/app.js").status_code == 200
+    # המסך ב-React: אותו קובץ עיצוב (/static/app.css), והקוד מהבנייה (/app/assets/...)
+    assert "/static/app.css?v=" in html and "{{v}}" not in html
+    for asset in re.findall(r'(/app/assets/[^"]+\.js)', html):
+        assert client.get(asset).status_code == 200
     assert client.get("/static/app.css").status_code == 200
+    # המסך הקודם (JavaScript רגיל) כבר לא מוגש — רק React
+    assert client.get("/classic").status_code == 404
+    assert "/static/app.js" not in html
 
 
 # ---------------- 18/10/2026: Ministry of Health branding through a theme
@@ -1613,9 +1620,13 @@ def test_page_shows_ministry_branding_without_a_demo_label():
     from app import api as api_module
 
     client = TestClient(api_module.app)
+    import re
+
     html = client.get("/").text
-    assert "/static/brand/moh-office.png" in html and "משרד הבריאות" in html
-    assert "דמו להאקתון" not in html
+    # React מצייר את המסך בדפדפן — המיתוג נמצא בקוד שהדף טוען
+    code = html + "".join(client.get(a).text for a in re.findall(r'(/app/assets/[^"]+\.js)', html))
+    assert "/static/brand/moh-office.png" in code and "משרד הבריאות" in code
+    assert "דמו להאקתון" not in code
     assert client.get("/static/brand/moh-office.png").status_code == 200
     # the gov.il typeface ships with the app, so the page looks right without internet access
     assert client.get("/static/fonts/rubik-hebrew.woff2").status_code == 200

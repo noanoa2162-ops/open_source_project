@@ -746,3 +746,95 @@ html[data-theme="dark"] .closebtn{background:rgba(255,255,255,.1)}
 .spicon{display:flex;gap:4px;width:3rem;height:3.6rem}
 .spicon i{flex:1;border:2px solid currentColor;border-radius:3px}
 .spicon-y{flex-direction:column}
+
+/* כללי המערכת (rules.py): ערך שנדחה, ורשומה ישנה שאינה עומדת בהם */
+input[aria-invalid="true"]{border-color:var(--amber)!important;box-shadow:0 0 0 3px var(--amber-bg)}
+.badge.rulebad{background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber-line);margin-inline-start:.45rem;font-size:.74rem;padding:.05rem .5rem;vertical-align:middle}
+
+/* 🙋 עזרה: כפתור בתקריב, פס מצב הבקשה, וחלון השליחה */
+.zhead .helpbtn{min-height:2.2rem;border-radius:50px;padding:.15rem .9rem;font-size:.9rem;white-space:nowrap}
+.zhelp{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .8rem;border-radius:var(--radius);padding:.6rem .8rem;margin:.4rem 0 .6rem;font-size:.92rem}
+.zhelp.wait{background:var(--primary-soft);color:var(--ink)}
+.zhelp.got{background:var(--ok-bg);color:var(--ink);border:1px solid var(--ok-line)}
+.zhelp .hv{font-weight:700;font-variant-numeric:tabular-nums}
+.zhelpbtns{display:flex;gap:.4rem;margin-inline-start:auto}
+.zhelpbtns button{min-height:2.1rem;padding:.1rem .8rem;font-size:.86rem}
+.zhelpnote{flex-basis:100%;color:var(--muted);font-size:.8rem}
+.helpmark{font-size:.85em}
+.habox{max-width:34rem}
+.habody{padding:1rem 1.5rem;display:flex;flex-direction:column;gap:.35rem}
+.hacrops{display:flex;flex-direction:column;gap:.4rem}
+.hacrops img{max-width:100%;max-height:9rem;object-fit:contain;align-self:flex-start;border:1px solid var(--line);border-radius:6px;background:#fff}
+.hacrops .haview{position:relative;overflow:hidden;align-self:flex-start;width:100%;height:9rem;border:1px solid var(--line);border-radius:6px;background:#fff}
+.hacrops .haview img{position:absolute;max-width:none;max-height:none;border:0;border-radius:0;object-fit:fill}
+.havalues{margin:.3rem 0;color:var(--ink)}
+.halbl{font-weight:600;color:var(--title);margin-top:.5rem}
+.habody textarea,.habody input{font:inherit;padding:.5rem .65rem;border:1px solid var(--line-2);border-radius:8px;background:var(--card);color:var(--ink)}
+.habody textarea:disabled,.habody input:disabled{opacity:.7}
+.hahint{color:var(--muted);font-size:.8rem}
+.halocal{margin:.5rem 0 0;padding:.5rem .7rem;border-radius:8px;background:var(--amber-bg);color:var(--amber);font-size:.85rem}
+#haWhatsapp{background:#1f8f4e}
+#haWhatsapp:hover{background:#18763f}
+
+/* 🙋 עזרה — למי לשלוח, ושלב "נשלח" */
+.hato{display:flex;flex-direction:column;gap:.35rem;margin-top:.6rem;padding-top:.7rem;border-top:1px solid var(--line)}
+.hasend{display:flex;flex-wrap:wrap;align-items:center;gap:.45rem;margin:.2rem 0 .3rem}
+.hasendlbl{color:var(--muted);font-size:.88rem}
+.hasend button{min-height:2.3rem;padding:.15rem 1rem}
+.haerr{margin:.2rem 0 0;padding:.5rem .7rem;border-radius:8px;background:var(--amber-bg);color:var(--amber);font-size:.88rem}
+.hadone{padding:1.3rem 1.5rem}
+.hadonemain{margin:0 0 .5rem;font-size:1.05rem;color:var(--ink)}
+.hadonealt{margin:0 0 .6rem;font-size:.9rem;color:var(--muted)}
+.hadonealt a{color:var(--primary)}
+.halink{width:100%;font:inherit;padding:.5rem .65rem;border:1px solid var(--line-2);border-radius:8px;background:var(--soft);color:var(--ink)}
+
+/* 🙋 עזרה — בחירת דרך שליחה, ואז מסך נפרד לכל דרך */
+.hapick{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem;margin-top:.3rem}
+.hachan{display:flex;flex-direction:column;align-items:center;gap:.35rem;padding:.9rem .5rem;border:2px solid var(--line);
+  border-radius:var(--radius);background:var(--card);color:var(--title);font:inherit;font-weight:600;cursor:pointer}
+.hachan:hover{border-color:var(--primary);background:var(--hover)}
+.hachan:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+.haicon{font-size:1.5rem;line-height:1}
+.haicon.wa{color:#1f8f4e}
+.hapane{display:flex;flex-direction:column;gap:.35rem}
+.hapane.hidden{display:none}
+.haback{align-self:flex-start;background:none;border:0;padding:.15rem 0;color:var(--primary);font:inherit;font-size:.9rem;cursor:pointer}
+.haback:hover{text-decoration:underline}
+@media (max-width:420px){.hapick{grid-template-columns:1fr}}
+.habox .habody{overflow:auto;min-height:0}  /* חלון גבוה מהמסך — התוכן גולל, הכפתורים למטה תמיד גלויים */
+.habox .habody > *{flex-shrink:0}  /* השדות שומרים על הגובה — גוללים, לא מועכים */
+
+/* בזמן הקריאה, כשטפסים כבר מוכנים: טופס מופיע פעם אחת — אמיתי ולחיץ, בלי פס הסינון (נפתח בסוף). */
+#results.early .filterbar,#results.early .resulthead{display:none}
+
+/* מסך הקליטה — בלי אחוזים (החלטת נועה, 21/10/2026). לפני הטופס הראשון: המסמכים "נכנסים" לטבלה.
+   מהטופס הראשון: פס דק שמתמלא, בלי מספר, והאריחים האמיתיים מתחתיו. */
+.intakebox{display:flex;flex-direction:column;align-items:center;gap:.4rem;padding:2.6rem 1rem 1rem;text-align:center}
+.intakebox #pTitle{font-size:1.25rem;color:var(--title)}
+.intakebox #pCount{color:var(--muted)}
+.hero.intake{width:min(320px,82%);margin-bottom:1rem}
+.hero.intake .sheets{animation:none}
+.hero.intake .s1g{transform-box:fill-box;transform-origin:center;animation:feed 2.4s ease-in-out infinite}
+@keyframes feed{0%{transform:translateX(0) scale(1);opacity:1}55%{transform:translateX(178px) scale(.32);opacity:0}
+  56%{transform:translateX(0) scale(.9);opacity:0}80%,100%{transform:translateX(0) scale(1);opacity:1}}
+.hero.intake .hl{animation:fillcell 2.4s ease-in-out infinite}
+.hero.intake .ok{animation:fillcell 2.4s ease-in-out .3s infinite}
+@keyframes fillcell{0%,45%{opacity:.2}62%,100%{opacity:1}}
+.pbarwrap{padding:.9rem 0 .3rem}
+.pbar{height:6px;border-radius:99px;background:var(--primary-soft);overflow:hidden}
+.pbar span{display:block;height:100%;border-radius:inherit;background:linear-gradient(270deg,#0068f5,#00a8cc);transition:width .6s ease}
+.pbarnote{margin:.6rem 0 0;color:var(--muted);font-size:.92rem;text-align:center}
+.pbarnote strong{color:var(--title)}
+/* זרם של טפסים (Upload.tsx → IntakeArt): 8 דפים, אחד כל 0.45 שנ׳, מחזור 3.6 שנ׳. כל דף עולה בקשת
+   קלה ונוחת בשורה שלו (--dy) ב-40% מהמחזור; השורה מאירה ברגע הנחיתה (מחזור 1.8 שנ׳ — 4 שורות) */
+.hero.intake .fly{transform-box:fill-box;transform-origin:center;opacity:0;animation:flyin 3.6s linear infinite}
+@keyframes flyin{0%{transform:translate(0,0) scale(.95) rotate(0);opacity:0}
+  5%{transform:translate(0,0) scale(1) rotate(0);opacity:1;animation-timing-function:ease-in}
+  22%{transform:translate(90px,calc(var(--dy) / 2 - 9px)) scale(.62) rotate(-7deg);opacity:1;animation-timing-function:ease-out}
+  40%{transform:translate(182px,var(--dy)) scale(.26) rotate(0);opacity:0}100%{opacity:0}}
+.hero.intake .icell{fill:var(--primary-soft)}
+.hero.intake .irow{opacity:.45;animation:rowlit 1.8s ease-out infinite}
+.hero.intake .irow .hl{animation:none}
+@keyframes rowlit{0%{opacity:1}55%,100%{opacity:.45}}
+@media(prefers-reduced-motion:reduce){.hero.intake .s1g,.hero.intake .hl,.hero.intake .ok,.hero.intake .fly,.hero.intake .irow{animation:none}
+  .hero.intake .irow{opacity:1}.pbar span{transition:none}}

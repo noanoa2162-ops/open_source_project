@@ -17,6 +17,10 @@ evaluation/
 exports/
 *.xlsx
 
+# ---- המסך (React) ----
+# הספריות מותקנות ב-npm ci; הבנייה (backend/app/web/dist) כן נשמרת — השרת מגיש אותה בלי Node
+frontend/node_modules/
+
 # ---- Python ----
 .venv/
 __pycache__/

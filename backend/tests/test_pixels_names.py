@@ -66,7 +66,8 @@ def test_the_message_tells_the_reader_the_image_size(tmp_path):
     judge._client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)))
     judge.extract(_page(tmp_path / "p.png", size=(1000, 1414)))
     text = sent["messages"][0]["content"][-1]["text"]
-    assert "רוחב 1000" in text and "גובה 1414" in text
+    # תמונה קטנה נשלחת מוגדלת עד 2000 בצלע הארוכה — וההודעה אומרת את הגודל שנשלח בפועל
+    assert "רוחב 1414" in text and "גובה 2000" in text
     assert "בפיקסלים" in judge._prompt and "0–1000" not in judge._prompt
 
 
@@ -308,6 +309,19 @@ def test_no_pen_ink_leaves_the_box_alone(tmp_path):
     assert field.region == (100 / 2000, 2000 / 2800, 300 / 2000, 2060 / 2800)
 
 
+def test_an_id_box_beside_the_name_does_not_jump_onto_the_name(tmp_path):
+    """Screenshot, 21/10/2026: the reader put the ID box in the gap after the name; the closest pen
+    ink was the name, and the ID's zoom showed the first name. An ID only snaps to ink inside its box."""
+    from app.locate import READER, snap_to_ink
+    record = FormRecord.empty("b", SOURCE, 1)
+    ids = record.fields["national_id"]
+    ids.values = ["11223314"]
+    ids.region = (1205 / 2000, 700 / 2800, 1350 / 2000, 760 / 2800)  # ליד השם, בלי דיו בתוכה
+    ids.region_note = READER
+    snap_to_ink(record, _ink_page(tmp_path))
+    assert ids.region == (1205 / 2000, 700 / 2800, 1350 / 2000, 760 / 2800) and ids.region_note == READER
+
+
 # ---------------------------------------------------------------- התמונה נשלחת בגודל שהמודל רואה
 
 
@@ -325,7 +339,10 @@ def test_large_page_is_sent_at_the_size_the_model_actually_sees(tmp_path):
         assert max(sent) <= cv.MAX_LONG_SIDE
     small = tmp_path / "small.png"
     Image.new("RGB", (1200, 1700), "white").save(small)
-    assert cv._image_block_sized(small, "png")[1] == (1200, 1700), "תמונה קטנה לא מוקטנת"
+    assert cv._image_block_sized(small, "png")[1] == (1412, 2000), "תמונה קטנה מוגדלת עד MIN_LONG_SIDE"
+    shot = tmp_path / "shot.png"
+    Image.new("RGB", (670, 909), "white").save(shot)  # צילום מסך (21/10/2026): ת"ז נחתכה על השם
+    assert cv._image_block_sized(shot, "png")[1] == (1474, 2000)
 
 
 def test_saved_boxes_measured_in_the_shrunk_image_are_fixed_on_the_whole_page(monkeypatch, tmp_path):
@@ -370,3 +387,45 @@ def test_full_page_is_served_in_ink_version_for_the_draggable_close_up(tmp_path,
         res = client.get("/api/batches/bat_ink/sources/1/pages/1" + query)
         assert res.status_code == 200 and res.headers["content-type"] == "image/png"
     store.delete("bat_ink")
+
+
+# ---------------------------------------------------------------- שם ממלא-מקום / אותה מילה פעמיים (22/10/2026)
+
+
+def _named(first: list[str], last: list[str]) -> FormRecord:
+    record = FormRecord.empty("b", SOURCE, 1)
+    record.fields["first_name"].values, record.fields["last_name"].values = first, last
+    for key in ("first_name", "last_name"):
+        record.fields[key].state = "ok"
+    return record
+
+
+def test_a_stand_in_name_is_always_orange_with_its_reason():
+    """Screenshot with a name in English letters: the reader answered "פלוני" — a guess, not a reading."""
+    from app.validators import validate_record
+    record = _named(["פלוני"], ["כהן"])
+    validate_record(record)
+    assert "name_placeholder" in record.fields["first_name"].reasons
+    assert record.fields["first_name"].state == "needs_review"
+    assert record.fields["first_name"].values == ["פלוני"], "הערך עצמו לא משתנה — רק מסומן"
+    assert "name_placeholder" not in record.fields["last_name"].reasons
+
+
+def test_the_same_word_as_first_and_last_name_is_orange():
+    from app.validators import validate_record
+    record = _named(["Paz"], ["Paz"])
+    validate_record(record)
+    assert all("names_identical" in record.fields[k].reasons for k in ("first_name", "last_name"))
+
+
+def test_the_organizers_sample_name_is_not_called_a_stand_in():
+    """The organizers' altered samples really say "ישראל ישראלי" — that is what is written."""
+    from app.validators import validate_record
+    record = _named(["ישראל"], ["ישראלי"])
+    validate_record(record)
+    assert not {"name_placeholder", "names_identical"} & set(record.fields["first_name"].reasons + record.fields["last_name"].reasons)
+
+
+def test_the_prompt_keeps_the_script_and_forbids_stand_in_names():
+    text = cv.ClaudeExtractionProvider(api_key="test")._prompt
+    assert "באותו כתב שבו נכתב" in text and "פלוני" in text

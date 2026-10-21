@@ -43,11 +43,18 @@ MAX_LONG_SIDE = 2576  # הגבול של Claude Sonnet 5.5 לתמונה ברזו�
 # לכל תמונה גדולה מזה). אז המודל מודד מיקומים בתמונה קטנה ממה שאמרנו לו — והתיבות זזות.
 # לכן שולחים כבר בגודל שהוא רואה: מה שכתוב בהודעה = מה שהוא רואה. אותה עלות, אותה איכות.
 MAX_PIXELS = 3_400_000
+# צילום מסך או תמונה קטנה (למשל 670×909) הגיעו למודל כמו שהם — פי 6 פחות פיקסלים מעמוד PDF.
+# שם המודל מיקם שדות בסטייה של עד 16% מרוחב הדף (ת"ז נחתכה על השם, 21/10/2026).
+# תמונה כזו מוגדלת עד שהצלע הארוכה שלה 2000 — כמו בבדיקת הכיוון ב-pages.py (OSD_MIN_SIDE).
+# עמוד PDF (~3,500) לא מושפע.
+MIN_LONG_SIDE = 2000
 
 
 def fit_scale(width: int, height: int) -> float:
-    """How much to shrink so the model sees the image exactly as sent."""
-    return min(1.0, MAX_LONG_SIDE / max(width, height), (MAX_PIXELS / (width * height)) ** 0.5)
+    """How much to resize so the model sees the image exactly as sent: shrink a large page,
+    enlarge a small image up to MIN_LONG_SIDE, never past the limits."""
+    limit = min(MAX_LONG_SIDE / max(width, height), (MAX_PIXELS / (width * height)) ** 0.5)
+    return min(limit, max(1.0, MIN_LONG_SIDE / max(width, height)))
 MAX_IMAGE_BYTES = 4_500_000  # מתחת לתקרת 5MB לתמונה, עם מרווח
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # מקום לחשיבה העמוקה ולתשובה. גבוה בכוונה — שהחשיבה לעולם לא תיקטע באמצע.

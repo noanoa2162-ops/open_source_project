@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>בקשת עזרה בבדיקת טופס</title>
+<link rel="icon" href="/static/brand/moh-office.png">
+<!-- הדף שהממונה פותח מהקישור: רק השדה ששאלו עליו — לא הטופס, לא שם המטופל, לא שדות אחרים -->
+<style>
+  :root{--primary:#0068f5;--primary-h:#015dd9;--title:#0c306a;--ink:#0c3058;--muted:#5878a4;--line:#e6ebf2;
+    --bg:#f7f9fd;--card:#fff;--soft:#f3f7ff;--amber:#a8540a;--amber-bg:#fff4e5;--ok:#2d7a4f;--ok-bg:#e9f6ee;
+    --govbar:linear-gradient(93deg,#025fdb,#025fdb 35%,#0b3668)}
+  @media (prefers-color-scheme: dark){:root{--primary:#5aa3ff;--primary-h:#7ab6ff;--title:#cfe0f4;--ink:#e6edf5;
+    --muted:#a2b2c6;--line:#27384e;--bg:#0e1724;--card:#152236;--soft:#1a2a40;--amber:#ffbf73;--amber-bg:#3a2a14;
+    --ok:#7fd6a3;--ok-bg:#16301f}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Rubik","Segoe UI",Arial,sans-serif}
+  .govbar{background:var(--govbar);color:#fff;padding:.8rem 1rem;font-weight:600}
+  .govbar .inner,main{max-width:40rem;margin:0 auto}
+  main{padding:1.2rem 1rem 3rem}
+  h1{color:var(--title);font-size:1.5rem;margin:.2rem 0 .3rem}
+  .sub{color:var(--muted);margin:0 0 1rem}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1.1rem;margin-bottom:1rem}
+  .q{background:var(--soft);border-radius:10px;padding:.7rem .9rem;margin:.2rem 0 0;white-space:pre-wrap}
+  .crop{display:block;max-width:100%;border:1px solid var(--line);border-radius:8px;margin:.6rem 0;background:#fff}
+  .lbl{display:block;font-weight:600;color:var(--title);margin:.9rem 0 .4rem}
+  .opts{display:flex;flex-wrap:wrap;gap:.5rem}
+  .opt{font:inherit;font-size:1.1rem;font-weight:600;padding:.55rem 1rem;border:2px solid var(--line);border-radius:10px;
+    background:var(--card);color:var(--ink);cursor:pointer;font-variant-numeric:tabular-nums}
+  .opt[aria-checked="true"]{border-color:var(--primary);box-shadow:0 0 0 3px rgba(0,104,245,.15)}
+  input,textarea{width:100%;font:inherit;padding:.6rem .7rem;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+  textarea{min-height:5rem;resize:vertical}
+  button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+  .send{margin-top:1.1rem;width:100%;font:inherit;font-weight:600;font-size:1.05rem;padding:.8rem;border:0;border-radius:50px;
+    background:var(--primary);color:#fff;cursor:pointer}
+  .send:hover{background:var(--primary-h)}
+  .send:disabled{opacity:.6;cursor:default}
+  .err{color:var(--amber);background:var(--amber-bg);border-radius:8px;padding:.6rem .8rem;margin-top:.8rem}
+  .done{color:var(--ok);background:var(--ok-bg);border-radius:10px;padding:1rem;font-weight:600}
+  .note{color:var(--muted);font-size:.85rem;margin-top:1rem}
+  .hidden{display:none}
+</style>
+  <script type="module" crossorigin src="/app/assets/help-D0ZkO8kz.js"></script>
+  <link rel="modulepreload" crossorigin href="/app/assets/ButtonBase-DhSR7I7a.js">
+</head>
+<body>
+<!-- דף הממונה ב-React — אותו עיצוב בדיוק (הסגנונות למעלה לא השתנו) -->
+<div id="root" style="display:contents"></div>
+</body>
+</html>

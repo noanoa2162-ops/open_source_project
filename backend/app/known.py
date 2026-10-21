@@ -16,7 +16,7 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from app import db
+from app import db, rules
 from app.models import STATE_APPROVED, FormRecord
 
 
@@ -52,6 +52,7 @@ def from_saved(record: FormRecord, saved: dict, same_page: bool) -> None:
     record.model_note = ""
     record.verified = True
     record.from_store = saved.get("approved_at") or ""
+    rules.reopen_broken(record)  # אושר לפני הכללים ואינו עומד בהם — השדות האלה כתומים, הטופס לאישור מחדש
 
 
 def apply_known(records: list[FormRecord]) -> int:
@@ -59,7 +60,8 @@ def apply_known(records: list[FormRecord]) -> int:
     their saved values. Returns how many."""
     found = 0
     for record in records:
-        if record.error or record.from_store or record.verified:
+        # version > 0: המזכירה כבר תיקנה את הטופס בזמן שהשאר נקראו — לא דורסים את התיקון
+        if record.error or record.from_store or record.verified or record.version > 0:
             continue
         try:
             saved = db.same_form(record.fields["commitment_numbers"].values, record.fields["national_id"].values)

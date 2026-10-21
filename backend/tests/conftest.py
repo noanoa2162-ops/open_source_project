@@ -29,6 +29,7 @@ def _isolated_database(tmp_path, monkeypatch):
     """Approved forms go to a temporary database, never to work/forms.db."""
     monkeypatch.setattr("app.db.DB_PATH", tmp_path / "forms.db")
     monkeypatch.setattr("app.db.PAGES_DIR", tmp_path / "approved_pages")
+    monkeypatch.setattr("app.db.HELP_DIR", tmp_path / "help_crops")  # תקריבים של בקשות עזרה
 
 
 @pytest.fixture(autouse=True)
