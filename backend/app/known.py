@@ -7,8 +7,11 @@ makes "אישור הטופס" required again (the API takes care of that).
 
 Two ways to know it is the same form:
 - the very same page (its pixels' fingerprint) — found before the model is called, free;
-- the same commitment number and a matching ID, from another file (PDF / photo) — found
-  after the reading, which is still needed to learn the number.
+- the same commitment number and the same ID, fully read in both, from another file
+  (PDF / photo) — found after the reading, which is still needed to learn the number.
+
+A commitment number that is already saved, without a fully read matching ID, is not the same
+form: the reading stays as it is, orange, and the commitment field says why (22/10/2026).
 """
 
 from __future__ import annotations
@@ -71,4 +74,13 @@ def apply_known(records: list[FormRecord]) -> int:
         if saved is not None:
             from_saved(record, saved, same_page=False)
             found += 1
+            continue
+        try:
+            seen = db.commitment_in_system(record.fields["commitment_numbers"].values)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            seen = False
+        if seen:
+            # אותו מספר התחייבות כבר נשמר, אבל הת"ז לא מאפשרת לוודא שזה אותו מטופל — לבדיקה, בלי מילוי
+            record.fields["commitment_numbers"].flag("commitment_in_system")
     return found

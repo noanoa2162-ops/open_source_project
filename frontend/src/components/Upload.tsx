@@ -57,11 +57,13 @@ export function UploadStrip() {
             <IntakeArt />
             <strong id="pTitle">{S.pTitle}</strong>
             <span id="pCount">{S.pCount}</span>
-            <ul id="pFiles">
-              {S.pFiles.map((f, i) => (
-                <li key={i}><bdi>{f.name}</bdi>{f.error ? <> — <span className="bad">{f.error}</span></> : null}</li>
-              ))}
-            </ul>
+            {S.tiles.length ? <IntakeThumbs /> : (
+              <ul id="pFiles">
+                {S.pFiles.map((f, i) => (
+                  <li key={i}><bdi>{f.name}</bdi>{f.error ? <> — <span className="bad">{f.error}</span></> : null}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </section>
@@ -69,15 +71,34 @@ export function UploadStrip() {
   );
 }
 
-// בזמן הקליטה: זרם של טפסים. 8 דפים יוצאים מהערימה בזה אחר זה (כל 0.45 שנ׳), כ-3 באוויר בבת
+// הטפסים שהתקבלו — תמונה ממוזערת לכל עמוד ברגע שהוא מוכן, עוד לפני שהמנוע קרא אותו.
+// המזכירה רואה מיד שהטופס שלה נקלט; הקריאה עצמה נמשכת כרגיל.
+const THUMBS_SHOWN = 8;
+function IntakeThumbs() {
+  const shown = S.tiles.slice(0, THUMBS_SHOWN);
+  const more = S.tiles.length - shown.length;
+  return (
+    <ul className="ithumbs" aria-label="הטפסים שהתקבלו">
+      {shown.map((t) => (
+        <li key={t.id} className={'ithumb ' + (t.cls || 'queued')}>
+          {t.thumb ? <img alt="" src={t.thumb} /> : null}
+          <span>{t.cls.startsWith('shown') ? '✓ נקרא' : t.cls === 'reading' ? 'נקרא עכשיו…' : 'ממתין'}</span>
+        </li>
+      ))}
+      {more > 0 ? <li className="ithumb more"><span>ועוד {more}</span></li> : null}
+    </ul>
+  );
+}
+
+// בזמן הקליטה: זרם של טפסים. 8 דפים יוצאים מהערימה בזה אחר זה (כל 0.7 שנ׳), כ-3 באוויר בבת
 // אחת, כל אחד בקשת קלה אל שורה בטבלה — והשורה מאירה כשהוא נוחת. השורות מתחלפות 1→4 ושוב.
 // כתום = שדה לבדיקה, כמו במערכת (בלי ירוק: ירוק = אושר על ידי אדם).
 const INTAKE_ROWS = [{ dy: -18, y: 19 }, { dy: 2, y: 39 }, { dy: 22, y: 59 }, { dy: 41, y: 79 }];
 const INTAKE_SHEETS = 8;
-const INTAKE_GAP = 0.45;  // שניות בין דף לדף; מחזור שלם = 8 × 0.45 = 3.6 שנ׳ (כמו ב-app.css)
+const INTAKE_GAP = 0.7;  // שניות בין דף לדף; מחזור שלם = 8 × 0.7 = 5.6 שנ׳ (כמו ב-app.css). 0.45 היה מהיר מדי
 const INTAKE_LAND = 0.4 * INTAKE_SHEETS * INTAKE_GAP;  // הדף נוחת ב-40% מהמחזור
 function IntakeArt() {
-  const cycle = INTAKE_ROWS.length * INTAKE_GAP;  // כל שורה מקבלת דף פעם ב-1.8 שנ׳
+  const cycle = INTAKE_ROWS.length * INTAKE_GAP;  // כל שורה מקבלת דף פעם ב-2.8 שנ׳
   return (
     <svg className="hero intake" viewBox="0 0 320 120" aria-hidden="true">
       <rect x="10" y="30" width="62" height="80" rx="6" className="sheet s3" />

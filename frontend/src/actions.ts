@@ -146,6 +146,8 @@ export function begin(info: { batch_id: string; rejected?: number }) {
   S.last = null;
   S.finishing = false;
   S.view = 'tiles';
+  S.filter = 'all';  // העלאה חדשה מתחילה תמיד ב"הכול" — גם אם קודם עמדו על "לבדיקה"
+  S.senderFilter = '';
   lastSignature = '';
   S.celebrated = false;
   S.approvedHere = false;
@@ -176,7 +178,9 @@ function fail(msg: string) {
 // גלגל אחד באחוזים, מההעלאה ועד הסוף. הכנת העמודים שווה 20%, הקריאה 80%; טופס באמצע קריאה נספר
 // כחצי. האחוז אף פעם לא יורד, ו-100% רק כשהכול גמור.
 export const RING_C = 2 * Math.PI * 52;
-const PCT_STEP = 40, TILE_STEP = 500, PREPARE_SHARE = 20;
+// קצב התצוגה בלבד (לא עבודה): האחוז עולה 1% כל 12ms, טופס מוכן מופיע אחרי 150ms (היה 40/500 — נמדד 22/10/2026:
+// כ-3.4 שניות המתנה מלאכותית לטופס אחד)
+const PCT_STEP = 12, TILE_STEP = 150, PREPARE_SHARE = 20;
 let ringTimer: ReturnType<typeof setTimeout> | null = null;
 let revealQueue: string[] = [], revealTimer: ReturnType<typeof setInterval> | null = null;
 let tilesBuilt: Record<string, { dataSrc: string; tile: (typeof S.tiles)[number] }> = {};
@@ -249,7 +253,8 @@ async function tick() {
   updateTiles(d);
   startReveal();
   S.pTitle = 'קולט את הטפסים…';
-  S.pCount = '';
+  const got = (d.pages || []).length;
+  S.pCount = !got ? '' : got === 1 ? 'הטופס התקבל — המנוע קורא אותו' : got + ' טפסים התקבלו — המנוע קורא אותם';
   S.pFiles = (d.sources || []).map((s) => ({ name: s.filename, error: s.error }));
   countTo(progressOf(d));
   if (!finished) {
@@ -296,7 +301,7 @@ function finish(me: string, d: Batch, n: number, total: number) {
     remember();
     if (S.view !== 'form') afterRender(() => $('#results')?.scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' }));
     emit();
-  }, calm ? 250 : 1300);
+  }, calm ? 250 : 400);
 }
 
 // אריחי הרקע של מסך הטעינה: שלד מהבהב בתור, והטופס עולה כשהוא נקרא. לא לחיצים.
@@ -305,10 +310,10 @@ function updateTiles(d: Batch) {
     const id = p.source_index + '-' + p.page_number;
     let built = tilesBuilt[id];
     if (!built) {
-      const tile = { id, src: '', cls: '', revealed: false, className: 'tile queued' } as any;
-      built = tilesBuilt[id] = {
-        dataSrc: '/api/batches/' + S.batch + '/sources/' + p.source_index + '/pages/' + p.page_number + '/thumb', tile,
-      };
+      const dataSrc = '/api/batches/' + S.batch + '/sources/' + p.source_index + '/pages/' + p.page_number + '/thumb';
+      // העמוד כבר מוכן (נכנס ל-pages רק אחרי ההכנה) — התמונה הממוזערת מוצגת מיד, עוד לפני שהמנוע קרא
+      const tile = { id, src: '', cls: '', revealed: false, className: 'tile queued', thumb: dataSrc } as any;
+      built = tilesBuilt[id] = { dataSrc, tile };
       S.tiles.push(tile);
     }
     const tile = built.tile as any;

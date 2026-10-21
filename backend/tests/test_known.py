@@ -158,3 +158,50 @@ def test_a_form_never_approved_is_read_as_usual(tmp_path, monkeypatch):
     assert not record.from_store and not record.verified
     assert record.fields["first_name"].values == ["שרה"]
     assert any(f.state == STATE_REVIEW for f in record.fields.values())  # שדות חסרים — כתומים כרגיל
+
+
+# ---------- 22/10/2026: ת"ז חסרה או לא ודאית אינה מוכיחה שזה אותו מטופל
+
+@pytest.mark.parametrize("unsure_id", [[], ["0123456?74"], ["012345674", "012345675"]],
+                         ids=["no-id", "unread-digit", "two-ids"])
+def test_same_commitment_without_a_sure_id_is_not_filled_from_the_system(tmp_path, monkeypatch, unsure_id):
+    """Before: an ID the reader missed counted as a match — the new form got another form's values,
+    every field green and the form approved. Now the reading stays, orange, and says why."""
+    _first_approval(tmp_path, monkeypatch)
+    other = {**SARA, "first_name": ["דוד"], "national_id": unsure_id}
+
+    again = _upload(monkeypatch, "bat_two", [_png(tmp_path, "david.png", 40)], PerFile({1: other})).records[0]
+
+    assert again.fields["first_name"].values == ["דוד"], "הקריאה נשארת — לא ערכים של טופס אחר"
+    assert not again.verified and not again.from_store
+    assert again.fields["commitment_numbers"].state == STATE_REVIEW
+    assert "commitment_in_system" in again.fields["commitment_numbers"].reasons
+
+
+def test_a_saved_form_without_an_id_never_fills_a_new_one(tmp_path, monkeypatch):
+    """The other direction: the form saved earlier had no ID."""
+    no_id = {**SARA, "national_id": []}
+    first = _upload(monkeypatch, "bat_one", [_png(tmp_path, "sara.png", 1)], PerFile({1: no_id})).records[0]
+    client = _client()
+    client.patch(f"/api/records/{first.record_id}", json={"field": "national_id", "values": []})
+    _approve_all_and_verify(first)
+
+    again = _upload(monkeypatch, "bat_two", [_png(tmp_path, "david.png", 40)],
+                    PerFile({1: {**SARA, "first_name": ["דוד"]}})).records[0]
+
+    assert again.fields["first_name"].values == ["דוד"] and not again.verified
+    assert "commitment_in_system" in again.fields["commitment_numbers"].reasons
+
+
+def test_approving_a_form_without_an_id_does_not_delete_another_saved_form(tmp_path, monkeypatch):
+    """Before: approving a second form with the same commitment number and no ID deleted the first."""
+    _first_approval(tmp_path, monkeypatch)
+    other = _upload(monkeypatch, "bat_two", [_png(tmp_path, "david.png", 40)],
+                    PerFile({1: {**SARA, "first_name": ["דוד"], "national_id": []}})).records[0]
+    client = _client()
+    for key in other.fields:
+        client.patch(f"/api/records/{other.record_id}", json={"field": key, "approve": True})
+    assert client.post(f"/api/records/{other.record_id}/verify").status_code == 200
+
+    names = sorted(r["first_name"] for r in db.list_rows(**RANGE)["rows"])
+    assert names == ["דוד", "שרה רבקה"], "שני הטפסים נשמרים — אף אחד לא נמחק"

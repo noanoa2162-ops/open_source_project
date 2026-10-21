@@ -106,7 +106,8 @@ def save_approved(record: FormRecord, source: SourceFile, page_png: Path,
     with _LOCK, _rows_conn(path) as conn:
         conn.execute(f"INSERT INTO approved_forms ({columns}) VALUES ({marks}) "
                      f"ON CONFLICT(form_key) DO UPDATE SET {updates}", row)
-        # אותו טופס מקובץ אחר (PDF/תמונה) — הגרסה הקודמת נמחקת; נשארת רק האחרונה (החלטת נועה, 20/10/2026)
+        # אותו טופס מקובץ אחר (PDF/תמונה) — הגרסה הקודמת נמחקת; נשארת רק האחרונה (החלטת נועה, 20/10/2026).
+        # רק בהתאמה מלאה של ת"ז (_same) — אחרת שני הטפסים נשמרים
         older = [f["form_key"] for f in _same(conn, record.fields["commitment_numbers"].values,
                                                record.fields["national_id"].values, exclude=key)]
         images = [kept for old in older for kept in _drop_form(conn, old)]
@@ -351,6 +352,15 @@ def _id_digits(values: list[str]) -> str:
     return "".join(ch for v in values for ch in v if ch.isdigit()).lstrip("0")
 
 
+def _sure_id(values: list[str]) -> str:
+    """The ID's digits when it is one fully read value, else "". A missing ID, a "?" or two
+    candidate IDs prove nothing about who the patient is."""
+    clean = [v.strip() for v in values if v.strip()]
+    if len(clean) != 1 or "?" in clean[0]:
+        return ""
+    return _id_digits(clean)
+
+
 def _split(value: str | None) -> list[str]:
     return [part.strip() for part in (value or "").split("|") if part.strip()]
 
@@ -384,9 +394,25 @@ def _same(conn: sqlite3.Connection, commitments: list[str], national_id: list[st
     marks = ", ".join("?" for _ in numbers)
     keys = [r["form_key"] for r in conn.execute(
         f"SELECT DISTINCT form_key FROM approved_rows WHERE commitment_number IN ({marks})", numbers)]
-    mine = _id_digits(national_id)
+    # אותו טופס רק כשהת"ז נקראה במלואה בשניהם וזהה. ת"ז חסרה, עם "?" או כפולה באחד מהם — לא
+    # מוכיח שזה אותו מטופל: לא ממלאים מהמערכת ולא מוחקים טופס שמור (תוקן 22/10/2026; קודם
+    # "ת"ז חסרה באחד מהם" נחשבה התאמה, והטופס החדש קיבל ערכים ירוקים של טופס שמור)
+    mine = _sure_id(national_id)
+    if not mine:
+        return []
     return [f for f in _forms(conn, [k for k in keys if k != exclude])
-            if not mine or not _id_digits(f["values"]["national_id"]) or _id_digits(f["values"]["national_id"]) == mine]
+            if _sure_id(f["values"]["national_id"]) == mine]
+
+
+def commitment_in_system(commitments: list[str], path: Path | None = None) -> bool:
+    """Whether an approved form with one of these commitment numbers is already saved."""
+    numbers = sorted({n.strip() for n in commitments if n.strip()})
+    if not numbers:
+        return False
+    marks = ", ".join("?" for _ in numbers)
+    with _LOCK, _rows_conn(path) as conn:
+        return conn.execute(
+            f"SELECT 1 FROM approved_rows WHERE commitment_number IN ({marks}) LIMIT 1", numbers).fetchone() is not None
 
 
 def saved_form(key: str, path: Path | None = None) -> dict | None:

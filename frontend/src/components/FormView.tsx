@@ -9,7 +9,7 @@ import {
   toggleInk, turnView, verify, visibleRecords,
 } from '../actions';
 import { Btn, HelpMark, StatusBadge, ValueView, storedText } from './Bits';
-import { EditInput } from './Results';
+import { EditInput, EmptyFilter } from './Results';
 
 // בסיבוב של 90° הרוחב והגובה מתחלפים: מקטינים כך שייכנס, ומגדילים את המסגרת לגובה החדש.
 export function fitTurned(el: HTMLElement, wrap: HTMLElement, img: HTMLImageElement, deg: number, heightShare: number) {
@@ -48,6 +48,19 @@ export function FormView() {
   const visible = S.view === 'form';
   const list = visible ? visibleRecords() : [];
   const r = visible ? currentRecord() : null;
+  if (visible && !r) {
+    // אף טופס לא נשאר בסינון (למשל "לבדיקה" אחרי שהכול אושר) — הודעה ברורה, לא כרטיס ריק
+    return (
+      <div id="formView">
+        <div className="formtop">
+          <Btn className="secondary back" id="backToTiles" onClick={backFromForm}>
+            {S.formFrom === 'records' ? '→ חזרה לרשומות במערכת' : S.formFrom === 'table' ? '→ חזרה לטבלה' : '→ כל הטפסים'}
+          </Btn>
+        </div>
+        <EmptyFilter />
+      </div>
+    );
+  }
   return (
     <div id="formView" className={visible ? undefined : 'hidden'}>
       <div className="formtop">

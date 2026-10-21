@@ -6,7 +6,7 @@ import { load } from './lib';
 
 export type Notice = { id: number; kind: string; title: string; text: string };
 export type Toast = { id: number; text: string; big: boolean; out: boolean; undo?: () => void };
-export type Tile = { id: string; src: string; cls: string; revealed: boolean };
+export type Tile = { id: string; src: string; cls: string; revealed: boolean; thumb?: string };
 export type Editor = { kind: 'cell' | 'card'; rec: string; key: string; raw: string; text: string; invalid: boolean };
 export type PopState = { kind: 'cell' | 'page'; rec: string; key: string; left: number; top: number; below: boolean;
   arrow: number; arrowY: number; shown: boolean } | null;

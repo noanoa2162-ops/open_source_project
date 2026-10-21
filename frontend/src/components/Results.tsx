@@ -5,11 +5,38 @@ import { LTR_KEYS, canApprove, firstValue, senderOf, whyOf } from '../lib';
 import { S, fieldLabel, pageUrl } from '../store';
 import {
   approveField, cancelPopTimer, chips, closePop, downloadReady, finishEdit, openExportPreview, openPop, openRecord,
-  schedulePop, scheduleClose, setFilter, setSenderFilter, setView, startEdit, startNewIntake, typeQuery, verify,
+  schedulePop, scheduleClose, setFilter, setSenderFilter, setView, showRecordsPage, startEdit, startNewIntake, typeQuery, verify,
   visibleRecords, waitingForJoin,
 } from '../actions';
 import { Btn, StatusBadge, ValueView, storedText } from './Bits';
 import { FormView } from './FormView';
+
+// סינון שלא נשאר בו אף טופס: אומרים בבירור למה, ומה אפשר לעשות — במקום מסך ריק
+export function EmptyFilter({ id }: { id?: string }) {
+  const all = S.last ? S.last.records.length : 0;
+  const review = S.filter === 'review';
+  const title = !all ? (S.processing ? 'הטפסים עוד נקראים…' : 'אין טפסים בהעלאה הזו')
+    : review ? 'אין טפסים שממתינים לבדיקה' : S.filter === 'approved' ? 'עוד לא אושרו טפסים' : 'אין טפסים שמתאימים לחיפוש או לסינון';
+  const why = !all ? '' : review ? 'כל הטפסים בהעלאה הזו נבדקו ואושרו.'
+    : S.filter === 'approved' ? 'טופס נכנס לכאן אחרי "אישור הטופס".' : 'נסו לנקות את החיפוש או לבחור "הכול".';
+  return (
+    <div className="empty-filter big" id={id} role="status">
+      <span className="emptyicon" aria-hidden="true">{review && all ? '✓' : '∅'}</span>
+      <b>{title}</b>
+      {why ? <p>{why}</p> : null}
+      <span className="emptyacts">
+        {all && (S.filter !== 'all' || S.query || S.senderFilter) ? <Btn className="primary" onClick={() => {
+          if (S.query) typeQuery('');
+          if (S.senderFilter) setSenderFilter('');
+          setFilter('all');
+        }}>הצגת כל {all} הטפסים</Btn> : null}
+        {S.rec.pendingN ? <Btn className="secondary" onClick={() => { S.rec.mode = 'pending'; S.rec.loaded = false; showRecordsPage(); }}>
+          טפסים ממתינים מהעלאות קודמות ({S.rec.pendingN})</Btn> : null}
+        <Btn className="secondary" onClick={() => startNewIntake()}>⬆ קליטה חדשה</Btn>
+      </span>
+    </div>
+  );
+}
 
 export function Results() {
   const formMode = S.view === 'form';
@@ -71,7 +98,7 @@ export function Results() {
             </tr></thead>
             <TableBody />
           </table>
-          <div className={'empty-filter' + (S.view === 'table' && visibleRecords().length === 0 ? '' : ' hidden')} id="emptyFilter">אין טפסים שמתאימים לסינון הזה.</div>
+          {S.view === 'table' && visibleRecords().length === 0 ? <EmptyFilter id="emptyFilter" /> : null}
         </div>
       </div>
 
@@ -88,7 +115,7 @@ export function Results() {
             </li>
           )) : null}
         </ul>
-        <div className={'empty-filter' + (S.view === 'tiles' && visibleRecords().length === 0 ? '' : ' hidden')} id="tilesEmpty">אין טפסים שמתאימים לסינון הזה.</div>
+        {S.view === 'tiles' && visibleRecords().length === 0 ? <EmptyFilter id="tilesEmpty" /> : null}
       </div>
 
       <FormView />

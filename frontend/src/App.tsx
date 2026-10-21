@@ -53,6 +53,10 @@ export function App() {
 
   const neutral = S.brand === 'neutral';
   const onRecords = S.page === 'records';
+  // "טפסים לבדיקה" מסומן כשעומדים על הטפסים (אריחים, טבלה או טופס, בכל סינון) — שם העמוד.
+  // "קליטת טפסים" — רק במסך ההעלאה ובזמן הקליטה (נועה, 22/10/2026)
+  const onReview = !onRecords && S.resultsVisible && !S.processing;
+  const onIntake = !onRecords && !onReview;
   return <>
     <a className="skip" href="#main">דילוג לתוכן</a>
 
@@ -88,8 +92,8 @@ export function App() {
           </span>
         </div>
         <nav className="pills" aria-label="ניווט במערכת">
-          <Btn className={'pill' + (!onRecords ? ' on' : '')} id="navUpload" aria-current={!onRecords ? 'page' : undefined} onClick={navUpload}>קליטת טפסים</Btn>
-          <Btn className="pill" id="navReview" disabled={chips.navReviewDisabled && !S.prevBatch && !S.rec.pendingN}
+          <Btn className={'pill' + (onIntake ? ' on' : '')} id="navUpload" aria-current={onIntake ? 'page' : undefined} onClick={navUpload}>קליטת טפסים</Btn>
+          <Btn className={'pill' + (onReview ? ' on' : '')} id="navReview" aria-current={onReview ? 'page' : undefined} disabled={chips.navReviewDisabled && !S.prevBatch && !S.rec.pendingN}
             title={chips.navReviewDisabled ? (S.prevBatch ? 'חזרה להעלאה הקודמת' : S.rec.pendingN ? 'טפסים שממתינים לאישור' : '') : undefined}
             onClick={navReview}>טפסים לבדיקה <b id="navReviewN">{chips.navReviewDisabled && !S.prevBatch ? S.rec.pendingN : chips.navReviewN}</b></Btn>
           <Btn className="pill" id="navExport" disabled={!chips.exportReady} title={S.last ? chips.exportWhy || 'הורדת כל הטפסים לקובץ Excel' : undefined}

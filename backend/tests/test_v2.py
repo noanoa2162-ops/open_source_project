@@ -696,6 +696,7 @@ def _streaming_client(sent, response=None):
 
 
 def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
+    from app.config import SETTINGS
     from app.providers import claude_vision as cv
 
     sent = {}
@@ -703,7 +704,7 @@ def test_opus_reads_with_deep_thinking_streamed(tmp_path, monkeypatch):
     judge._client = _streaming_client(sent, _claude_response(_page_reading(), model="claude-opus-5-5"))
     raw = judge.extract(_swatches(tmp_path / "page-001.png"))
     assert sent["model"] == "claude-opus-5-5"
-    assert sent["output_config"] == {"effort": "high"}, "נועה בחרה high"
+    assert sent["output_config"] == {"effort": SETTINGS.claude_effort}, "הרמה שנבחרה ב-.env נשלחת כמו שהיא"
     assert sent["max_tokens"] >= 64_000, "החשיבה לא נקטעת באמצע"
     assert "thinking" not in sent, "ב-Opus 5.5 החשיבה תמיד פועלת; העומק נקבע ב-effort"
     assert raw.model == "claude-opus-5-5"
@@ -988,7 +989,7 @@ def test_default_setup_is_one_opus_reader(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     s = load_settings()
     assert s.reader_model == "claude-opus-5-5"
-    assert s.claude_effort == "high"
+    assert s.claude_effort == "medium"  # נועה, 22/10/2026 (היה high)
     assert s.max_cost_per_batch_usd == 10.0
 
 
@@ -1631,3 +1632,13 @@ def test_page_shows_ministry_branding_without_a_demo_label():
     # the gov.il typeface ships with the app, so the page looks right without internet access
     assert client.get("/static/fonts/rubik-hebrew.woff2").status_code == 200
     assert client.get("/api/config").json()["brand"] in ("moh", "neutral")
+
+
+def test_the_default_thinking_level_is_medium(monkeypatch):
+    """Noa, 22/10/2026: medium instead of high — faster. .env can still choose another level."""
+    from app import config
+
+    for name in ("READER_EFFORT", "JUDGE_EFFORT", "JUDGE_B_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
+    assert config.load_settings().claude_effort == "medium"
+    assert config.Settings.__dataclass_fields__["claude_effort"].default == "medium"
