@@ -1266,11 +1266,23 @@ export function helpViews(r: Rec, key: string): (number[] | null)[] {
 }
 
 // יוצר את הבקשה (פעם אחת לשדה) ומחזיר את הקישור; שליחה שוב — אותו קישור (אלא אם פג)
+export function helpOrigin() {
+  // בענן הכתובת מגיעה מהשרת (APP_ORIGIN), כדי שמייל לעולם לא יקבל localhost
+  // או כתובת Preview. מקומית לא שולחים בכלל: הטוקן המקומי אינו קיים במסד שבענן.
+  const configured = String(S.config?.public_origin || '').replace(/\/+$/, '');
+  if (configured) return configured;
+  return /^(localhost|127\.|\[::1\])/.test(location.hostname) ? '' : location.origin.replace(/\/+$/, '');
+}
 async function helpLink() {
+  const origin = helpOrigin();
+  if (!origin) {
+    helpError('כדי לשלוח קישור פעיל, פתחי את המערכת באתר שבענן.', '#haPick');
+    return null;
+  }
   const r = recordById(S.help.rec);
   const f = r && r.fields[S.help.key];
   if (!f) return null;
-  if (f.help && !f.help.expired) return location.origin + '/help/' + encodeURIComponent(f.help.token);
+  if (f.help && !f.help.expired) return origin + '/help/' + encodeURIComponent(f.help.token);
   const asker = S.help.asker.trim();
   save('helpAsker', asker);
   const res = await fetch('/api/records/' + S.help.rec + '/help', {
@@ -1280,7 +1292,7 @@ async function helpLink() {
   if (!res.ok) { await refuseStale(res); return null; }
   const d = await res.json();
   forceRender(d);
-  return location.origin + '/help/' + encodeURIComponent(d.help_token);
+  return origin + '/help/' + encodeURIComponent(d.help_token);
 }
 
 // ההודעה עצמה: מי שואלת, על איזה שדה ומה השאלה, וקישור. בלי ערכים, בלי שם מטופל, בלי ת"ז.

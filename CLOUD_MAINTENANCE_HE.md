@@ -7,6 +7,9 @@
 - Vercel מפעיל שני containers: שרת האתר מתוך `Dockerfile.vercel`, ועובד רקע מתוך `Dockerfile.worker`.
 - Supabase שומר את נתוני האפליקציה ב־PostgreSQL בסכמה הפרטית `app_private` ואת הקבצים ב־Storage bucket הפרטי `documents`.
 - מפתח Anthropic שמור רק כ־Environment Variable סודי ב־Vercel.
+- בהאקתון `PUBLIC_DEMO=1`: אין מסך כניסה. בכניסה הראשונה השרת מנפיק לדפדפן
+  עוגיית Session חתומה, זמנית, `Secure` ו־`HttpOnly`. `ACCESS_PASSWORD` משמש רק
+  כסוד חתימה בצד השרת, ומפתח Anthropic אינו נשלח לקוד ה־React.
 
 ## פרסום שינוי קוד
 
@@ -37,6 +40,15 @@ Push למאגר `yk6749841-ai/open_source_project` אינו מעדכן את הא
 
 שינוי Environment Variable משפיע רק על deployment חדש. שמירה ללא Redeploy אינה מעדכנת את התהליך שכבר רץ.
 
+## החלפת פרטי הכניסה לאתר
+
+1. לדמו הציבורי משאירים ב־Vercel את `PUBLIC_DEMO=1`; אין שם משתמש או סיסמה במסך.
+2. `ACCESS_PASSWORD` עדיין חייב להיות סוד אקראי באורך 24 תווים לפחות. הוא חותם
+   Sessions בצד השרת ואינו מוצג למשתמשת.
+3. בשימוש עתידי של המעבדה עם מידע אמיתי משנים את `PUBLIC_DEMO` ל־`0`, מבצעים
+   Redeploy, ואז מסך הכניסה משתמש ב־`ACCESS_USER` וב־`ACCESS_PASSWORD`.
+4. שינוי סוד החתימה מבטל אוטומטית את כל Sessions הישנים.
+
 ## גישה למסד ולמסמכים
 
 - Dashboard: `https://supabase.com/dashboard/project/yndbhnlqvyfstceyormr`
@@ -65,4 +77,3 @@ Push למאגר `yk6749841-ai/open_source_project` אינו מעדכן את הא
 - מסכי הממתינים והרשומות נקראים מה־DB.
 - העלאת קובץ ניסוי, עיבוד, פיצול ידני, אישור, יצוא ומחיקה עובדים.
 - בודקים Usage ב־Vercel, Supabase ו־Anthropic כדי לזהות חריגה מוקדם.
-

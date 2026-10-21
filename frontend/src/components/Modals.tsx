@@ -360,7 +360,7 @@ function HelpAsk() {
               </div>
               <p className={'haerr' + (H.err ? '' : ' hidden')} id="haErr" role="alert">{H.err}</p>
             </div>
-            <p className={'halocal' + (local ? '' : ' hidden')} id="haLocal">⚠ המערכת רצה עכשיו על המחשב הזה (localhost) — הקישור ייפתח רק במחשב הזה. בשרת המשותף הוא ייפתח מכל מקום.</p>
+            <p className={'halocal' + (local ? '' : ' hidden')} id="haLocal">⚠ המערכת רצה עכשיו על המחשב הזה (localhost). כדי לשלוח קישור פעיל לממונה, פתחי את האתר שבענן.</p>
           </div>
 
           {/* אחרי השליחה: החלון לא נסגר — אומרים בדיוק מה קרה ומה נשאר לעשות */}

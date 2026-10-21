@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import secrets
 import shutil
 import threading
@@ -99,6 +100,14 @@ def config() -> dict:
         "max_files": SETTINGS.max_files_per_batch,
         "sample": SAMPLE_PATH.is_file(),
         "cloud_uploads": cloud_enabled(),
+        "public_demo": (
+            os.environ.get("PUBLIC_DEMO", "").strip().lower() in ("1", "true", "yes")
+            if cloud_enabled() else False
+        ),
+        # The browser uses this for e-mail/WhatsApp help links. In cloud mode it
+        # comes from the validated deployment origin, never from localhost or a
+        # preview/request Host header.
+        "public_origin": os.environ.get("APP_ORIGIN", "").rstrip("/") if cloud_enabled() else "",
         "brand": SETTINGS.brand,
         "fields": [
             {"key": f.key, "label": f.label_he, "multi": f.multi, "hint": f.hint_he}
