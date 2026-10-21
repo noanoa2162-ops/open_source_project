@@ -24,10 +24,10 @@ MAX_RESPONSE = 4_000_000  # Stay below the Function payload limit.
 
 
 def validate_environment():
-    required = ("DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ACCESS_PASSWORD", "APP_ORIGIN")
+    required = ("DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "APP_ORIGIN")
     if any(not os.environ.get(name) for name in required):
         raise RuntimeError("Cloud configuration is incomplete; see .env.cloud.example")
-    if len(os.environ["ACCESS_PASSWORD"]) < 24:
+    if not public_access() and len(os.environ.get("ACCESS_PASSWORD", "")) < 24:
         raise RuntimeError("ACCESS_PASSWORD must contain at least 24 characters")
     for name in ("APP_ORIGIN", "SUPABASE_URL"):
         url = urlsplit(os.environ[name])
@@ -39,6 +39,10 @@ def validate_environment():
         raise RuntimeError("Use the Supabase session pooler (5432), not transaction mode")
     if database.get("sslmode") not in ("require", "verify-ca", "verify-full"):
         raise RuntimeError("DATABASE_URL must require TLS")
+
+
+def public_access() -> bool:
+    return os.environ.get("PUBLIC_ACCESS", "").strip().lower() in ("1", "true", "yes")
 
 
 class _Rollback(Exception):
@@ -55,10 +59,16 @@ class CloudGateway:
         self.app = app
         self.lock = asyncio.Lock()
         self.origin = os.environ["APP_ORIGIN"].rstrip("/")
-        expected = os.environ.get("ACCESS_USER", "demo") + ":" + os.environ["ACCESS_PASSWORD"]
-        self.credentials_hash = hashlib.sha256(expected.encode()).digest()
+        self.public = public_access()
+        if self.public:
+            self.credentials_hash = None
+        else:
+            expected = os.environ.get("ACCESS_USER", "demo") + ":" + os.environ["ACCESS_PASSWORD"]
+            self.credentials_hash = hashlib.sha256(expected.encode()).digest()
 
     def authorized(self, headers):
+        if self.public:
+            return True
         try:
             scheme, encoded = headers.get(b"authorization", b"").split(b" ", 1)
             value = base64.b64decode(encoded, validate=True)

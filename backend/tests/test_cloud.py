@@ -41,6 +41,8 @@ def test_environment_fails_closed(cloud_settings, monkeypatch):
     monkeypatch.setenv("ACCESS_PASSWORD", "short")
     with pytest.raises(RuntimeError, match="24"):
         gateway.validate_environment()
+    monkeypatch.setenv("PUBLIC_ACCESS", "1")
+    gateway.validate_environment()
 
 
 @pytest.mark.parametrize("url", [
@@ -64,6 +66,17 @@ def test_auth_and_cross_site_requests(cloud_settings):
     assert client.post("/api/test", auth=credentials, headers={"Origin": "https://evil.example"}).status_code == 403
     assert client.post("/api/test", auth=credentials).status_code == 403
     assert client.get("/", auth=credentials).status_code == 404  # Authenticated, no route.
+
+
+def test_public_access_removes_login_but_keeps_origin_protection(cloud_settings, monkeypatch):
+    monkeypatch.setenv("PUBLIC_ACCESS", "1")
+    monkeypatch.delenv("ACCESS_PASSWORD")
+    app = FastAPI()
+    app.add_middleware(gateway.CloudGateway)
+    client = TestClient(app)
+    assert client.get("/").status_code == 404
+    assert client.post("/api/test", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.post("/api/test").status_code == 403
 
 
 def test_parameters_do_not_rewrite_literals_or_values():
