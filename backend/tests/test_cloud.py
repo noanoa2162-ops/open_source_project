@@ -316,8 +316,17 @@ def seeded():
     source = SourceFile(index=1, filename="synthetic.png", kind="png", page_count=1, sha256="abc123")
     batch.sources.append(source)
     record = FormRecord.empty(batch.batch_id, source, 1)
+    valid_values = {
+        "first_name": "שם בדיקה",
+        "last_name": "ישראל",
+        "national_id": "123456782",
+        "central_numbers": "123",
+        "sample_received_date": "01/01/2020",
+        "sending_entity": "מכבי",
+        "commitment_numbers": "123",
+    }
     for key, field in record.fields.items():
-        field.values = ["123"] if key != "first_name" else ["שם בדיקה"]
+        field.values = [valid_values[key]]
         field.state = "approved"
     batch.records.append(record)
     batch.pages.append({"source_index": 1, "page_number": 1, "record_id": record.record_id, "status": "done"})
