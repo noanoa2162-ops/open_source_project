@@ -431,7 +431,7 @@ def test_upload_finalization_is_idempotent_and_worker_runs_without_http(cloud, m
             return RawExtraction(values={"first_name": ["בדיקה"]}, model="stub")
 
     reader = Reader()
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (reader, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (reader, ""))
     output = io.BytesIO()
     Image.new("RGB", (100, 200), "white").save(output, "PNG")
     data = output.getvalue()

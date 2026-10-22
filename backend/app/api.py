@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response, RedirectResp
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from app import db, gold, halves, pipeline, rules, store, twoforms
+from app import barcodes, db, gold, halves, pipeline, rules, store, twoforms
 from app.config import PROJECT_ROOT, SETTINGS
 from app.cloud import enabled as cloud_enabled
 from app.crops import crop_field, padded
@@ -823,6 +823,7 @@ def update_record(record_id: str, payload: dict) -> dict:
         if len(values) != len(field.values):
             field.value_regions = []  # המיקומים לפי ערך כבר לא תואמים
         field.values = values
+        barcodes.after_person(record, key)  # הצעות הברקוד נוצלו; "✓ ברקוד" רק אם הערך תואם ברקוד
         # תיקון אנושי מנקה את הדגלים האוטומטיים — האדם ראה את המקור.
         field.settle()
         field.state = STATE_APPROVED if values else STATE_REVIEW
@@ -945,6 +946,7 @@ def _serialise(batch: Batch) -> dict:
         "warnings": batch.warnings,
         "cost_usd": batch.cost_usd,
         "seconds": batch.seconds,
+        "barcodes": barcodes.summary(batch.records),
         "pages": batch.pages,
         "sources": [
             {
@@ -995,6 +997,10 @@ def _serialise(batch: Batch) -> dict:
                         "crop_boxes": [list(padded(r)) if r else None for r in f.value_regions]
                         if len(f.value_regions) == len(f.values) and len(f.values) > 1 else [],
                         "can_undo": bool(f.history),
+                        # מקור עצמאי שאימת את הספרות (ברקוד). לא אישור אנושי.
+                        "confirmed_by": f.confirmed_by,
+                        # ערכים מהברקוד לבחירה בלחיצה
+                        "suggestions": f.suggestions,
                         # למה אי אפשר לאשר את הערך הזה (rules.py) — ריק כשאפשר
                         "blocked": rules.problems(key, f.values),
                         "help": _help_view(helps.get((r.record_id, key))),  # בקשת עזרה פעילה לשדה

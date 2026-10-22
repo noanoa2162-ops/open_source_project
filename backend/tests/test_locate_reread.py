@@ -168,7 +168,7 @@ def failed_batch(tmp_path, monkeypatch):
     batch.records.append(record)
     batch.pages = [{"source_index": 1, "page_number": 1, "status": PAGE_FAILED, "record_id": record.record_id}]
     store.put(batch)
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (reader, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (reader, ""))
     yield batch, record, reader
     store.delete("bat_rr")
 

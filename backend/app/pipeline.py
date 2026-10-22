@@ -11,6 +11,7 @@ for progress. One page failing never stops the rest.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from app import barcodes
 from app.config import BATCHES_DIR, SETTINGS, WORK_DIR
 from app.consensus import NAME_KEYS, combine, merge_names
 from app.crops import crop_field
@@ -49,10 +51,50 @@ from app.cloud import enabled as cloud_enabled
 from app.validators import validate_record
 
 
-def checkpoint(batch: Batch) -> None:
+def checkpoint(batch: Batch, lock=None) -> None:
     if cloud_enabled():
         from app.cloud.state import checkpoint as save_checkpoint
-        save_checkpoint(batch)
+        save_checkpoint(batch, lock)
+
+
+class Checkpointer:
+    """Saves the batch in the background after each page, without holding up the reading.
+
+    In the cloud every finished page used to save the whole batch (files + database) on the
+    reading thread itself, inside the shared lock — so other pages waited. Now a page only
+    marks the batch as changed; one background thread saves, and several changes that arrive
+    while it is saving become one save. Locally there is nothing to save, so nothing runs."""
+
+    def __init__(self, batch: Batch, lock=None) -> None:
+        self.batch = batch
+        self.lock = lock
+        self.enabled = cloud_enabled()
+        self._dirty = threading.Event()
+        self._stop = threading.Event()
+        self._thread = None
+        if self.enabled:
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="checkpoint")
+            self._thread.start()
+
+    def changed(self) -> None:
+        if self.enabled:
+            self._dirty.set()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            if not self._dirty.wait(0.5):
+                continue
+            self._dirty.clear()
+            try:
+                checkpoint(self.batch, self.lock)
+            except Exception:  # noqa: BLE001 - השמירה הבאה (או הסופית) תנסה שוב
+                traceback.print_exc()
+
+    def close(self) -> None:
+        """Stop the background saver. The caller saves the final state itself."""
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=60)
 
 Page = tuple[SourceFile, int, Path]
 
@@ -74,14 +116,20 @@ _READERS_LOCK = threading.Lock()
 
 def build_reader() -> tuple[ExtractionProvider | None, str]:
     """The reader configured in .env, or None and a visible reason why not."""
-    key = (SETTINGS.reader_model, SETTINGS.anthropic_api_key, SETTINGS.claude_effort)
+    model, effort = SETTINGS.reader_model, SETTINGS.claude_effort
+    key = (model, SETTINGS.anthropic_api_key, effort, SETTINGS.reader_thinking)
     with _READERS_LOCK:
         if key in _READERS:
             return _READERS[key], ""
-        from app.providers.claude_vision import ClaudeExtractionProvider
-
         try:
-            reader = ClaudeExtractionProvider(model=key[0], api_key=key[1], effort=key[2])
+            if model.startswith("gemini"):
+                from app.providers.gemini_vision import GeminiExtractionProvider
+
+                reader = GeminiExtractionProvider(model=model, effort=effort)
+            else:
+                from app.providers.claude_vision import ClaudeExtractionProvider
+
+                reader = ClaudeExtractionProvider(model=key[0], api_key=key[1], effort=key[2], thinking=key[3])
         except ExtractionError as exc:
             return None, str(exc)
         _READERS[key] = reader
@@ -153,12 +201,12 @@ def _process(batch_id: str) -> None:
 
     # הכנת העמודים והקריאה חופפות: כל עמוד נשלח לקריאה ברגע שהוא מוכן, בלי לחכות לשאר
     # (נמדד 21/10/2026: 30 עמודים חיכו קודם כדקה וחצי לפני הקריאה הראשונה).
+    # גם בענן (22/10/2026): השמירה רצה ברקע ומצלמת את המצב תחת אותו מנעול שבו עמוד חדש נוסף,
+    # כך שהיא לעולם לא רואה עמוד חצי-רשום.
     provider, problem = build_reader()
     reading = _Reading(Reader(provider), batch) if provider is not None else None
-    # בענן מצב ההעלאה נשמר ל-DB אחרי כל עמוד (checkpoint) — שם הקריאה מתחילה אחרי שכל העמודים
-    # מוכנים, כדי שהשמירה לא תרוץ בזמן שעמודים חדשים עוד נוספים. הכנת העמודים עצמה מקבילה גם שם.
-    overlap = reading is not None and not cloud_enabled()
-    pages = _render_all(batch_id, batch, on_ready=reading.submit if overlap else None)
+    pages = _render_all(batch_id, batch, on_ready=reading.submit if reading else None,
+                        lock=reading.lock if reading else None)
     batch.total_pages = len(pages)
     checkpoint(batch)
     if not pages:
@@ -173,9 +221,6 @@ def _process(batch_id: str) -> None:
         batch.error = problem or "אין מודל זמין לקריאה."
         return
 
-    if not overlap:
-        for index, page in enumerate(pages):
-            reading.submit(index, page)
     reader = reading.reader
     reading.finish()
     batch.seconds = round(time.perf_counter() - started, 1)
@@ -230,6 +275,7 @@ class _Reading:
         self.results: dict[int, FormRecord | None] = {}
         self.futures = []
         self.pool = ThreadPoolExecutor(max_workers=SETTINGS.max_parallel_calls)
+        self.saver = Checkpointer(batch, self.lock)
 
     def submit(self, index: int, page: Page) -> None:
         future = self.pool.submit(self._work, index, page)
@@ -279,10 +325,11 @@ class _Reading:
             batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
             status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
             batch.processed_pages += 1
-            checkpoint(batch)
+        self.saver.changed()  # נשמר ברקע — הקריאה לא מחכה לשמירה
 
     def finish(self) -> list[FormRecord | None]:
         self.pool.shutdown(wait=True)
+        self.saver.close()  # השמירה הסופית נעשית ב-_run, אחרי חיבור החצאים
         for future in self.futures:
             future.result()  # תקלה בקוד עצמו (לא בקריאה) — גלויה, כמו קודם
         count = len(self.futures)
@@ -319,6 +366,7 @@ def read_form(
         record.seconds = round(time.perf_counter() - started, 1)
         return record
 
+    barcodes.prefetch(image_path)  # ברקודים — מקומי, במקביל לקריאה של המודל
     try:
         reading = _read(reader.provider, image_path, source, page_number)
     except ExtractionError as exc:
@@ -347,6 +395,11 @@ def apply_reading(record: FormRecord, reading: RawExtraction, image_path: Path) 
     # קריאה שנייה של השם מתקריב — כבויה (18/10/2026, החלטת נועה): עלתה 3–6¢ לטופס ובמדידה
     # על 3 טפסים שיפרה אחד, לא שינתה אחד והחמירה אחד. הפונקציה נשארת: look_again_at_names.
     validate_record(record)
+    # ברקודים בעמוד — קורא שני, מדויק וחינמי, למספרים. אחרי כל הבדיקות, כדי לדעת מה כבר סומן.
+    try:
+        barcodes.apply(record, barcodes.read(image_path))
+    except Exception:  # noqa: BLE001 - תקלה כאן לא מפילה את הקריאה
+        traceback.print_exc()
 
 
 def saved_readings(image_path: Path, sha256: str = "", page_number: int = 0) -> list[tuple[str, RawExtraction]]:
@@ -535,9 +588,12 @@ def show_upright(record: FormRecord, image_path: Path) -> None:
     is not sent again — that would double the cost; the row says what happened.
     """
     turn_upside_down(image_path)
+    barcodes.forget(image_path)
     for field in record.fields.values():
         if field.region:
             field.region = _turned(field.region)
+        field.value_regions = [_turned(r) if r else None for r in field.value_regions]
+    record.barcodes = [{**b, "region": list(_turned(tuple(b["region"])))} for b in record.barcodes]
     note = "הדף הגיע הפוך — סובב לתצוגה. הקריאה נעשתה על הדף ההפוך, מומלץ לבדוק"
     record.straightened = " · ".join(filter(None, [record.straightened, note]))
 
@@ -563,9 +619,12 @@ def _read(
 ) -> RawExtraction:
     """The reading of one page — from the saved answers when this exact page was
     already read, in any file and at any position, with the same model and prompt."""
+    effort = getattr(reader, "effort", "medium")
     same_reader = (
         reader.model,
-        None,  # מקום שמור (היה "חיתוך" לתמונה) — נשאר כדי שתשובות שמורות ימשיכו להימצא
+        # עומק החשיבה: תשובה מעומק אחר לא נלקחת. medium נשאר None — כך
+        # נשמרו התשובות עד 22/10/2026, והן ממשיכות להימצא בחינם.
+        None if effort == "medium" else effort,
         getattr(reader, "prompt_version", PROMPT_VERSION),
     )
     turned = turn_note(image_path)
@@ -661,7 +720,7 @@ def _is_low_resolution(image_path: Path) -> bool:
         return False
 
 
-def _render_all(batch_id: str, batch: Batch, on_ready=None) -> list[Page]:
+def _render_all(batch_id: str, batch: Batch, on_ready=None, lock=None) -> list[Page]:
     """Flatten every accepted file into one ordered list of pages.
 
     The page cap applies to the whole drop, not to each file, because every
@@ -685,11 +744,12 @@ def _render_all(batch_id: str, batch: Batch, on_ready=None) -> list[Page]:
             def found(number: int, path: Path, source: SourceFile = source) -> None:
                 # כל עמוד שמוכן נספר מיד — המסך סופר 1, 2, 3 כבר בזמן הזיהוי — ונשלח לקריאה
                 page = (source, number, path)
-                index = len(flattened)
-                flattened.append(page)
-                batch.pages.append({"source_index": source.index, "page_number": number,
-                                    "status": PAGE_QUEUED, "record_id": ""})
-                batch.found_pages += 1
+                with lock or contextlib.nullcontext():
+                    index = len(flattened)
+                    flattened.append(page)
+                    batch.pages.append({"source_index": source.index, "page_number": number,
+                                        "status": PAGE_QUEUED, "record_id": ""})
+                    batch.found_pages += 1
                 if on_ready:
                     on_ready(index, page)
 

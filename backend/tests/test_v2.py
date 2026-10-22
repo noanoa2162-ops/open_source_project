@@ -282,7 +282,7 @@ def test_budget_cap_stops_before_the_next_call(tmp_path, monkeypatch):
     expensive = reading("a")
     expensive.usage = Usage(1, 1, 0.03)
     judge = Judge("a", expensive)
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (judge, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (judge, ""))
 
     batch = Batch(batch_id="bat_budget")
     for i in range(1, 6):
@@ -360,7 +360,8 @@ def test_api_serves_values_and_crop_box(api):
     field = data["records"][0]["fields"]["national_id"]
     assert field["values"] == ["011223344"]
     assert field["crop_box"] is not None
-    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note", "can_undo", "blocked", "help"}
+    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note",
+                          "can_undo", "blocked", "help", "confirmed_by", "suggestions"}
 
 
 def test_api_crop_endpoint(api):
@@ -721,7 +722,10 @@ def test_claude_sends_the_page_once(tmp_path):
 
     images = [c for c in sent["content"] if c["type"] == "image"]
     assert len(images) == 1, "תמונה אחת — העמוד עצמו (בלי חלוקה לרבעים)"
-    assert images[0]["source"]["data"] == cv.page_png_b64(page)
+    with Image.open(page) as original:
+        expected = cv.encode_image(original.convert("RGB"), "jpeg")[0]
+    assert images[0]["source"]["media_type"] == "image/jpeg", "JPEG קודם: רבע מהבייטים, אותם פיקסלים"
+    assert images[0]["source"]["data"] == expected
     assert sent["content"][-1]["type"] == "text"
 
 def _blocking_client(sent_types, block, status=418):
@@ -746,7 +750,7 @@ def test_filter_block_resends_the_page_in_another_encoding(tmp_path):
     judge = cv.ClaudeExtractionProvider(api_key="test")
     judge._client = _blocking_client(sent, block=1)
     raw = judge.extract(_swatches(tmp_path / "page-001.png"))
-    assert sent == ["image/png", "image/jpeg"], "PNG נחסם → אותו דף כ-JPEG"
+    assert sent == ["image/jpeg", "image/jpeg"], "JPEG נחסם → אותו דף כ-JPEG אפור (בייטים אחרים)"
     assert raw.values
 
 
@@ -757,9 +761,14 @@ def test_filter_blocking_every_encoding_says_so_and_is_not_fatal(tmp_path):
     sent = []
     judge = cv.ClaudeExtractionProvider(api_key="test")
     judge._client = _blocking_client(sent, block=99)
-    with pytest.raises(ExtractionError) as caught:
-        judge.extract(_swatches(tmp_path / "page-001.png"))
-    assert len(sent) == len(cv.ENCODINGS) == 3, "שלושה קידודים ואז עוצרים"
+    cv.FILTER_RETRY_SECONDS, waited = 0, cv.FILTER_RETRY_SECONDS
+    try:
+        with pytest.raises(ExtractionError) as caught:
+            judge.extract(_swatches(tmp_path / "page-001.png"))
+    finally:
+        cv.FILTER_RETRY_SECONDS = waited
+    assert len(cv.ENCODINGS) == 4
+    assert len(sent) == 2 * len(cv.ENCODINGS), "כל הקידודים, המתנה (NetFree בודק כ-10 שניות), עוד סבב — ואז עוצרים"
     assert "NetFree" in str(caught.value) and "לא חויבה" in str(caught.value)
     assert caught.value.fatal is False, "שאר הטפסים ממשיכים"
 
@@ -775,7 +784,7 @@ def test_other_errors_do_not_trigger_another_encoding(tmp_path):
     judge._client = _blocking_client(sent, block=99, status=500)
     with pytest.raises(ExtractionError):
         judge.extract(_swatches(tmp_path / "page-001.png"))
-    assert sent == ["image/png"], "שגיאת שרת — לא שולחים שוב בקידוד אחר"
+    assert sent == ["image/jpeg"], "שגיאת שרת — לא שולחים שוב בקידוד אחר"
     del anthropic
 
 
@@ -1020,7 +1029,7 @@ def test_build_reader_is_the_configured_claude_model(monkeypatch):
 def test_batch_with_one_reader_keeps_sure_values_in_normal_colour(tmp_path, monkeypatch):
     monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
     judge = Judge("claude-opus-5-5", reading("claude-opus-5-5", commitment_numbers=["730578626"]))
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (judge, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (judge, ""))
     batch = Batch(batch_id="bat_one")
     source = SourceFile(index=1, filename="f.png", kind="png", sha256="")
     batch.sources.append(source)
@@ -1562,7 +1571,7 @@ def test_sample_form_comes_from_saved_answers_without_a_paid_call(tmp_path, monk
             NoMoney.calls += 1
             return reading("claude-opus-5-5", commitment_numbers=["730578626"])
 
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (NoMoney(), ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (NoMoney(), ""))
     monkeypatch.setattr(pipeline, "start", lambda batch_id: pipeline._process(batch_id))
     client = TestClient(api_module.app)
     assert client.get("/api/config").json()["sample"] is True

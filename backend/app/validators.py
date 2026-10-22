@@ -60,6 +60,9 @@ REASON_TEXT = {
     "name_placeholder": "שם ממלא-מקום (כמו \"פלוני\") — לוודא שכך באמת כתוב בטופס",
     "names_identical": "שם פרטי ושם משפחה זהים — לוודא שלא נקראה אותה מילה פעמיים",
     "commitment_in_system": "מספר ההתחייבות כבר קיים במערכת בטופס אחר, והת\"ז לא מאפשרת לוודא שזה אותו מטופל — לבדוק",
+    "barcode_differs": "הברקוד שליד הערך אומר מספר אחר — לבחור את הנכון",
+    "kupa_on_hospital_form": "קופת חולים כגורם שולח, אבל הטופס של בית חולים — לרוב השולח הוא בית החולים (הלוגו של הקופה מטעה)",
+    "barcode_candidates": "השדה ריק, אבל בדף יש ברקוד שלא שויך — אולי זה הערך",
 }
 # שמות ממלאי-מקום שמודל כותב כשאינו מצליח לקרוא (נצפה 21/10/2026: "פלוני" על שם שנכתב באנגלית).
 # בלי "ישראל ישראלי": כך כתוב בפועל בטפסי הדוגמה של המארגנים.
@@ -97,6 +100,7 @@ def validate_record(
 
     _check_names_together(record)
     _check_sender(record.fields["sending_entity"])
+    _check_sender_against_form(record)
     _check_received_date(record, today or date.today())
     _check_numbers_across_fields(record)
 
@@ -207,6 +211,23 @@ def _israeli_id_valid(value: str) -> bool:
         digit = int(char) * (1 if index % 2 == 0 else 2)
         total += digit if digit < 10 else digit - 9
     return total % 10 == 0
+
+
+# קופות החולים ברשימה הסגורה, ומילים שמעידות שסוג הטופס (כפי שהקורא תיאר אותו) הוא של בית חולים
+KUPOT = {"כללית", "מכבי", "מאוחדת", "לאומית"}
+_HOSPITAL_FORM = re.compile(r'בית\s*ה?חולים|בי"?ח|מרכז\s*רפואי|המרכז\s*הרפואי')
+
+
+def _check_sender_against_form(record: FormRecord) -> None:
+    """The reader named a kupa as the sender, but itself described the form as a hospital's.
+
+    The instructions already say: on a hospital form the sender is the hospital, even when
+    a kupa logo is printed on it. Measured 22/10/2026 on the 48 sample pages: every time two
+    of the readers broke this rule they marked the field as certain, so no other check caught
+    it. This one only adds orange. It never changes the value."""
+    field = record.fields["sending_entity"]
+    if field.values and set(field.values) <= KUPOT and _HOSPITAL_FORM.search(record.template or ""):
+        field.flag("kupa_on_hospital_form")
 
 
 def _check_sender(field: ExtractedField) -> None:

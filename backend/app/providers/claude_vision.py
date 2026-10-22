@@ -17,6 +17,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import threading
+import time
 from pathlib import Path
 
 import anthropic
@@ -59,12 +61,69 @@ MAX_IMAGE_BYTES = 4_500_000  # מתחת לתקרת 5MB לתמונה, עם מרו
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # מקום לחשיבה העמוקה ולתשובה. גבוה בכוונה — שהחשיבה לעולם לא תיקטע באמצע.
 MAX_OUTPUT_TOKENS = 64_000
+# בלי חשיבה התשובה היא ה-JSON בלבד (נמדד: 400–1,400 טוקנים). מרווח גדול, בלי עלות נוספת.
+MAX_OUTPUT_TOKENS_NO_THINKING = 16_000
 READ_TIMEOUT_SECONDS = 15 * 60  # לטופס אחד, כולל חשיבה
 # סינון אינטרנט (NetFree) חוסם בקשה בקוד 418 כשרצף האותיות של התמונה המקודדת יוצר במקרה
 # "מילה אסורה". אז שולחים את אותו דף בקידוד אחר — רצף אחר לגמרי. בקשה חסומה לא מגיעה
-# ל-Anthropic ולא מחויבת. הסדר: PNG רגיל, JPEG צבעוני, JPEG אפור.
+# ל-Anthropic ולא מחויבת.
 FILTER_BLOCKED = 418
-ENCODINGS = ("png", "jpeg", "jpeg_gray")
+# הסדר: JPEG צבעוני, JPEG אפור, PNG. נמדד 22/10/2026 על 12 עמודי הדוגמה: PNG שוקל 1.42MB
+# בממוצע ולוקח 2–3.7 שניות לקודד; JPEG באיכות 90 — כרבע מהגודל ועשירית שנייה. המחיר זהה:
+# המודל מחויב לפי פיקסלים, לא לפי בייטים. אותם פיקסלים, אותו גודל — רק העלאה מהירה יותר.
+ENCODINGS = ("jpeg", "jpeg_gray", "jpeg_alt", "png")
+JPEG_QUALITY = 90
+JPEG_ALT_QUALITY = 84  # אותה תמונה, רצף בייטים אחר — עוד הזדמנות לעבור את הסינון
+# כשכל הקידודים נחסמו: NetFree בודק תמונות ומשחרר אחרי כ-10 שניות (נצפה ע"י נועה, 22/10/2026).
+# סבב אחד נוסף אחרי ההמתנה. בקשה חסומה לא מגיעה ל-Anthropic ולא מחויבת.
+FILTER_RETRY_SECONDS = 10
+
+# ---- מטמון ההוראות (כ-14,000 טוקנים) ----
+# המטמון נהיה קריא רק כשהתשובה הראשונה מתחילה לזרום. עמודים שנשלחים יחד בהתחלה — כל אחד
+# כותב את המטמון מחדש, במחיר מלא ועוד 25%. נמדד 22/10/2026: ב-Opus כל כתיבה כזו עולה כ-7¢,
+# כך שהעלאה של 30 טפסים עם 10 קריאות במקביל שילמה כ-60¢ מיותרים (כ-40% מהעלות).
+# לכן: העמוד הראשון יוצא לבד, והשאר משתחררים ברגע שהוא מתחיל לזרום (שניות ספורות).
+FIRST_PAGE_WAIT_SECONDS = 90  # לא מחכים לנצח: אם הראשון נתקע, השאר יוצאים בכל זאת
+
+
+class CacheGate:
+    """Lets one request write the prompt cache before the others read it.
+
+    `enter()` returns "go" (the cache is warm), "lead" (this request writes it) or
+    "wait" (wait for the leader to start streaming, then go). Every request that starts
+    streaming keeps the cache warm for another TTL."""
+
+    def __init__(self, warm_seconds: float) -> None:
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._warm_until = 0.0
+        self._leading = False
+        self.warm_seconds = warm_seconds
+
+    def enter(self) -> str:
+        with self._lock:
+            if time.monotonic() < self._warm_until:
+                return "go"
+            if not self._leading:
+                self._leading = True
+                self._ready.clear()
+                return "lead"
+            return "wait"
+
+    def wait(self) -> None:
+        self._ready.wait(FIRST_PAGE_WAIT_SECONDS)
+
+    def started(self) -> None:
+        """A response began streaming: the cache is readable and its timer restarted."""
+        with self._lock:
+            self._warm_until = time.monotonic() + self.warm_seconds
+            self._ready.set()
+
+    def release(self) -> None:
+        """The leader finished (or failed): never leave the others waiting."""
+        with self._lock:
+            self._leading = False
+            self._ready.set()
 
 _COORDS = """
 ## מיקום כל ערך — `boxes` ו-`box`
@@ -90,6 +149,27 @@ def _ask(size: tuple[int, int]) -> str:
     return f"גודל התמונה: רוחב {width} פיקסלים, גובה {height} פיקסלים.\n{_ASK}"
 
 
+def thinking_for(model: str, effort: str, wanted: str = "auto") -> dict | None:
+    """The `thinking` setting to send, or None to leave it out.
+
+    Opus 5.5 always thinks: only `effort` sets how deep, and turning it off is a 400.
+    Haiku 5.5 and Sonnet 5.5 can answer without thinking (at effort high or below).
+    Reading a form is looking, not reasoning, and the answer comes several times faster.
+    `wanted`: auto (= off where the model allows it) | on | off."""
+    if wanted == "on" or effort in ("xhigh", "max"):
+        return None
+    if model.startswith("claude-haiku-5"):
+        return {"type": "disabled"}
+    if model.startswith("claude-sonnet-5-5"):
+        return {"type": "between_tools"}  # ב-Sonnet 5.5 זו הדרך לענות בלי חשיבה
+    return None
+
+
+def has_fallback(model: str) -> bool:
+    """Server-side refusal fallback exists for Opus/Sonnet 5.5, not for Haiku 5.5."""
+    return not model.startswith("claude-haiku")
+
+
 class ClaudeExtractionProvider:
     name = "claude"
 
@@ -99,12 +179,14 @@ class ClaudeExtractionProvider:
         model: str | None = None,
         *,
         effort: str | None = None,
+        thinking: str | None = None,
     ) -> None:
         key = api_key or SETTINGS.anthropic_api_key
         if not key:
             raise ExtractionError("אין ANTHROPIC_API_KEY בקובץ .env", fatal=True)
         self.model = model or SETTINGS.reader_model
         self.effort = effort or SETTINGS.claude_effort
+        self.thinking = thinking_for(self.model, self.effort, thinking or SETTINGS.reader_thinking)
         # ה-SDK מנסה שוב לבד על עומס (429) ושגיאות שרת (5xx). קריאה שנכשלה לא מחויבת.
         self._client = anthropic.Anthropic(
             api_key=key, max_retries=2, timeout=READ_TIMEOUT_SECONDS
@@ -113,39 +195,71 @@ class ClaudeExtractionProvider:
         self.prompt_version = prompt_version(self._prompt)
         self._names_prompt = NAMES_PROMPT
         self.names_version = NAMES_VERSION
+        self.cache_ttl = "1h" if SETTINGS.prompt_cache_ttl == "1h" else "5m"
+        # מרווח ביטחון מתחת לתוקף האמיתי (שעה / 5 דקות)
+        self._gate = CacheGate(55 * 60 if self.cache_ttl == "1h" else 4 * 60)
 
     def extract(self, image_path: Path) -> RawExtraction:
-        for encoding in ENCODINGS:
-            try:
-                return self._extract(image_path, encoding)
-            except anthropic.APIStatusError as exc:
-                if getattr(exc, "status_code", None) != FILTER_BLOCKED:
-                    message, fatal = _classify(exc)
-                    raise ExtractionError(message, fatal=fatal) from exc
-                blocked = exc  # הסינון חסם את הקידוד הזה — מנסים את הבא
+        role = self._gate.enter()
+        if role == "wait":
+            self._gate.wait()  # העמוד הראשון כותב את המטמון; השאר יקראו אותו בעשירית מהמחיר
+        try:
+            return self._extract_any_encoding(image_path)
+        finally:
+            if role == "lead":
+                self._gate.release()
+
+    def _extract_any_encoding(self, image_path: Path) -> RawExtraction:
+        blocked: Exception | None = None
+        for attempt in range(2):
+            if attempt:
+                time.sleep(FILTER_RETRY_SECONDS)  # NetFree משחרר לרוב אחרי בדיקה של כ-10 שניות
+            for encoding in ENCODINGS:
+                try:
+                    return self._extract(image_path, encoding)
+                except anthropic.APIStatusError as exc:
+                    if getattr(exc, "status_code", None) != FILTER_BLOCKED:
+                        message, fatal = _classify(exc)
+                        raise ExtractionError(message, fatal=fatal) from exc
+                    blocked = exc  # הסינון חסם את הקידוד הזה — מנסים את הבא
         raise ExtractionError(
             "הבקשה נחסמה על ידי סינון האינטרנט במחשב (NetFree) — לא הגיעה ל-Claude ולא חויבה. "
             "אפשר לבקש מ-NetFree לפתוח את api.anthropic.com."
         ) from blocked
 
+    def _request(self, system: str, content: list, output_format) -> dict:
+        """The request fields shared by the page and the close-up readings."""
+        request = dict(
+            model=self.model,
+            max_tokens=MAX_OUTPUT_TOKENS if self.thinking is None else MAX_OUTPUT_TOKENS_NO_THINKING,
+            # הפרומפט הקבוע ראשון ועם סימון מטמון — משולם במלואו פעם אחת בלבד.
+            system=[{"type": "text", "text": system, "cache_control": self._cache_control()}],
+            messages=[{"role": "user", "content": content}],
+            output_format=output_format,
+            # עומק החשיבה. ב-Opus 5.5 החשיבה תמיד פועלת; זה קובע כמה עמוק.
+            output_config={"effort": self.effort},
+        )
+        if self.thinking is not None:
+            request["thinking"] = self.thinking  # Haiku/Sonnet: קריאה בלי חשיבה, מהירה פי כמה
+        if has_fallback(self.model):
+            # בסירוב — הבקשה עוברת אוטומטית למודל גיבוי במקום להיכשל.
+            request.update(betas=[FALLBACK_BETA], fallbacks="default")
+        return request
+
+    def _cache_control(self) -> dict:
+        # שעה: העלאות במעבדה מגיעות בהפרשים של יותר מ-5 דקות. כתיבה עולה פי 2 במקום פי 1.25,
+        # וכל קריאה מהמטמון מאריכה אותו שוב — כך משלמים על ההוראות פעם אחת לשעה, לא לכל העלאה.
+        return {"type": "ephemeral", "ttl": "1h"} if self.cache_ttl == "1h" else {"type": "ephemeral"}
+
     def _extract(self, image_path: Path, encoding: str) -> RawExtraction:
         block, size = _image_block_sized(image_path, encoding)
-        images = [block]
         try:
-            # streaming: חשיבה עמוקה = תשובה ארוכה, וה-SDK לא מאפשר אותה בלי זרימה.
+            # streaming: תשובה ארוכה (בחשיבה), וה-SDK לא מאפשר אותה בלי זרימה.
             with self._client.beta.messages.stream(
-                model=self.model,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                # הפרומפט הקבוע ראשון ועם סימון מטמון — משולם במלואו פעם אחת בלבד.
-                system=[{"type": "text", "text": self._prompt, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": [*images, {"type": "text", "text": _ask(size)}]}],
-                output_format=PageReading,
-                # עומק החשיבה. ב-Opus 5.5 החשיבה תמיד פועלת; זה קובע כמה עמוק.
-                output_config={"effort": self.effort},
-                # בסירוב — הבקשה עוברת אוטומטית למודל גיבוי במקום להיכשל.
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
+                **self._request(self._prompt, [block, {"type": "text", "text": _ask(size)}], PageReading)
             ) as stream:
+                _first_event(stream)  # התשובה התחילה לזרום = המטמון קריא לשאר העמודים
+                self._gate.started()
                 response = stream.get_final_message()
         except anthropic.APITimeoutError as exc:
             raise ExtractionError("Claude לא סיים לקרוא את הטופס בזמן. נסו שוב.") from exc
@@ -197,14 +311,7 @@ class ClaudeExtractionProvider:
         block, _ = _image_block_sized(crop_path, encoding)
         try:
             with self._client.beta.messages.stream(
-                model=self.model,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                system=[{"type": "text", "text": self._names_prompt, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": [block, {"type": "text", "text": _ASK_NAMES}]}],
-                output_format=NameReading,
-                output_config={"effort": self.effort},
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
+                **self._request(self._names_prompt, [block, {"type": "text", "text": _ASK_NAMES}], NameReading)
             ) as stream:
                 response = stream.get_final_message()
         except anthropic.APITimeoutError as exc:
@@ -227,36 +334,45 @@ class ClaudeExtractionProvider:
         return to_name_check(parsed, served_by, _usage(served_by, response))
 
 
-def _image_block(image_path: Path, encoding: str = "png") -> dict:
+def _first_event(stream) -> None:
+    """Wait for the first streamed event (the rest is read by get_final_message)."""
+    try:
+        events = iter(stream)
+    except TypeError:  # תחליף בבדיקות שאינו זורם
+        return
+    next(events, None)
+
+
+def _image_block(image_path: Path, encoding: str = "jpeg") -> dict:
     return _image_block_sized(image_path, encoding)[0]
 
 
-def _image_block_sized(image_path: Path, encoding: str = "png") -> tuple[dict, tuple[int, int]]:
-    """The image block, and the exact pixel size of the image inside it — the
-    reader's positions are in those pixels."""
-    if encoding == "png":
-        data, media_type = page_png_b64(image_path), "image/png"
-    else:
-        data, media_type = page_jpeg_b64(image_path, gray=encoding == "jpeg_gray"), "image/jpeg"
-    with Image.open(io.BytesIO(base64.b64decode(data))) as sent:
-        size = sent.size
+def _image_block_sized(image_path: Path, encoding: str = "jpeg") -> tuple[dict, tuple[int, int]]:
+    """The image block, and the exact pixel size of the image inside it. The reader's
+    positions are in those pixels. The size comes from the encoder itself, not from
+    decoding the result again."""
+    with Image.open(image_path) as page:
+        data, media_type, size = encode_image(page.convert("RGB"), encoding)
     return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}, size
 
 
-def encode_image(image: Image.Image, encoding: str = "png") -> tuple[str, str, tuple[int, int]]:
-    """Base64 data, media type and the exact size sent — at most 2576 px on the long
-    side and under 5MB. PNG normally; JPEG when a network filter blocked the PNG."""
+def encode_image(image: Image.Image, encoding: str = "jpeg") -> tuple[str, str, tuple[int, int]]:
+    """Base64 data, media type and the exact size sent: at most 2576 px on the long
+    side and under 5MB. JPEG normally (a quarter of the bytes, the same pixels); PNG
+    when a network filter blocked both JPEG versions."""
     scale = fit_scale(*image.size)
     while True:
         size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
         sized = image if size == image.size else image.resize(size, Image.Resampling.LANCZOS)
         if encoding == "jpeg_gray":
             sized = sized.convert("L")
+        elif encoding == "jpeg" and sized.mode not in ("RGB", "L"):
+            sized = sized.convert("RGB")
         buffer = io.BytesIO()
         if encoding == "png":
             sized.save(buffer, format="PNG", optimize=True)
         else:
-            sized.save(buffer, format="JPEG", quality=92)
+            sized.save(buffer, format="JPEG", quality=JPEG_ALT_QUALITY if encoding == "jpeg_alt" else JPEG_QUALITY)
         data = buffer.getvalue()
         if len(data) <= MAX_IMAGE_BYTES or scale < 0.3:
             media_type = "image/png" if encoding == "png" else "image/jpeg"
@@ -273,7 +389,7 @@ def page_jpeg_b64(image_path: Path, gray: bool = False) -> str:
         size = (max(1, round(page.width * scale)), max(1, round(page.height * scale)))
         sized = page if size == page.size else page.resize(size, Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
-        sized.save(buffer, format="JPEG", quality=92)
+        sized.save(buffer, format="JPEG", quality=JPEG_QUALITY)
         return base64.standard_b64encode(buffer.getvalue()).decode("ascii")
 
 
@@ -312,11 +428,16 @@ def _usage(model: str, response: object) -> Usage | None:
     fresh = int(getattr(raw, "input_tokens", 0) or 0)
     cache_read = int(getattr(raw, "cache_read_input_tokens", 0) or 0)
     cache_write = int(getattr(raw, "cache_creation_input_tokens", 0) or 0)
+    # כתיבה למטמון של שעה מחויבת פי 2 (ולא פי 1.25) — מופרדת כאן כדי שהעלות המוצגת תהיה נכונה
+    split = getattr(raw, "cache_creation", None)
+    write_1h = int(getattr(split, "ephemeral_1h_input_tokens", 0) or 0) if split is not None else 0
+    write_1h = min(write_1h, cache_write)
     out = int(getattr(raw, "output_tokens", 0) or 0)
     return Usage(
         fresh + cache_read + cache_write,
         out,
-        cost_usd(model, fresh, out, cache_read_tokens=cache_read, cache_write_tokens=cache_write),
+        cost_usd(model, fresh, out, cache_read_tokens=cache_read,
+                 cache_write_tokens=cache_write - write_1h, cache_write_1h_tokens=write_1h),
     )
 
 

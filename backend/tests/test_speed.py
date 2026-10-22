@@ -72,7 +72,7 @@ class Slow:
 
 
 def _start(tmp_path, monkeypatch, reader, pages=30, **settings) -> Batch:
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (reader, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (reader, ""))
     monkeypatch.setattr(pipeline, "SETTINGS", replace(pipeline.SETTINGS, **settings))
     batch = Batch(batch_id="bat_speed")
     batch.sources.append(SourceFile(index=1, filename="thirty.pdf", kind="pdf"))

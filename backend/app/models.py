@@ -48,6 +48,10 @@ class ExtractedField:
     value_regions: list[Region | None] = field(default_factory=list)
     # המצבים הקודמים של השדה, לכפתור "בטל" במסך: {values, state, reasons}
     history: list[dict] = field(default_factory=list)
+    # מקור עצמאי שאישר את הספרות, למשל ["barcode"]. לא אישור אנושי — ירוק נשאר רק של אדם.
+    confirmed_by: list[str] = field(default_factory=list)
+    # ערכים שקורא מקומי חינמי (ברקוד) מציע — נבחרים רק בלחיצה של אדם
+    suggestions: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -121,6 +125,8 @@ class FormRecord:
     version: int = 0  # עולה בכל שינוי של אדם — עריכה ממסך ישן נדחית ולא דורסת
     # הטופס כבר אושר בעבר: הערכים הגיעו מהמערכת ולא מהקריאה. מועד האישור השמור (UTC), או ריק
     from_store: str = ""
+    # ברקודים שפוענחו מקומית בעמוד: {text, kind, region}
+    barcodes: list[dict] = field(default_factory=list)
 
     @property
     def review_count(self) -> int:

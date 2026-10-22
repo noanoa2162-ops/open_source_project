@@ -32,12 +32,13 @@ def decode(data: dict) -> Batch:
     return Batch(**data)
 
 
-def save(batch: Batch):
+def save(batch: Batch, payload: dict | None = None):
+    payload = payload if payload is not None else dataclasses.asdict(batch)
     with connect() as conn:
         conn.execute(
             "INSERT INTO batches(batch_id,payload) VALUES (%s,%s) "
             "ON CONFLICT(batch_id) DO UPDATE SET payload=excluded.payload,updated_at=now()",
-            (batch.batch_id, Jsonb(dataclasses.asdict(batch))),
+            (batch.batch_id, Jsonb(payload)),
         )
 
 
@@ -83,11 +84,16 @@ def enqueue(batch: Batch, kind="extract", record_id=None):
         )
 
 
-def checkpoint(batch: Batch):
+def checkpoint(batch: Batch, lock=None):
     # Artifacts must be durable before the snapshot advertises that a page is ready.
     from . import storage
     storage.flush()
-    save(batch)
+    if lock is None:
+        save(batch)
+        return
+    with lock:  # צילום עקבי של המצב — רק לרגע ההעתקה, לא לכל השמירה
+        payload = dataclasses.asdict(batch)
+    save(batch, payload)
 
 
 def interrupt_running():

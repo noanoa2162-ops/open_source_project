@@ -23,6 +23,10 @@ from app.config import DATA_DIR, SETTINGS
 from .postgres import connect
 
 _BASELINE: dict[str, str] = {}
+# (mtime_ns, size, sha256) לכל קובץ שכבר נשמר — קובץ שלא השתנה לא נקרא ולא מחושב שוב.
+# לפני כן כל שמירת מצב (אחרי כל עמוד) קראה וחישבה מחדש את כל קבצי העבודה: בהעלאה של
+# 30 עמודים — כ-4GB של קריאה.
+_STAT: dict[str, tuple[int, int, str]] = {}
 _LOCK = threading.RLock()
 _LAST_SWEEP = 0.0
 
@@ -96,10 +100,18 @@ def restore_prefix(prefix: str):
 
 def put(path: Path):
     key = logical(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return
+    known = _STAT.get(key)
+    if known and known[:2] == (stat.st_mtime_ns, stat.st_size) and _BASELINE.get(key) == known[2]:
+        return  # לא השתנה מאז שנשמר
     # Hash the bytes actually uploaded, even if another page thread replaces a file.
     data = path.read_bytes()
     hashed = hashlib.sha256(data).hexdigest()
     if _BASELINE.get(key) == hashed:
+        _STAT[key] = (stat.st_mtime_ns, stat.st_size, hashed)
         return
     object_key = "objects/" + hashed
     with connect() as conn:
@@ -122,6 +134,8 @@ def put(path: Path):
                 conn.execute("INSERT INTO garbage(object_key) VALUES (%s) ON CONFLICT DO NOTHING",
                              (previous["object_key"],))
     _BASELINE[key] = hashed
+    if len(data) == stat.st_size:  # הקובץ לא השתנה בזמן הקריאה
+        _STAT[key] = (stat.st_mtime_ns, stat.st_size, hashed)
 
 
 def collect_garbage():
@@ -172,6 +186,7 @@ def remove(path: Path):
             conn.execute("INSERT INTO garbage(object_key) VALUES (%s) ON CONFLICT DO NOTHING", (row["object_key"],))
     path.unlink(missing_ok=True)
     _BASELINE.pop(key, None)
+    _STAT.pop(key, None)
 
 
 def remove_prefix(prefix: str):
@@ -213,3 +228,4 @@ def reset_scratch():
         if target.exists():
             shutil.rmtree(target)
     _BASELINE.clear()
+    _STAT.clear()

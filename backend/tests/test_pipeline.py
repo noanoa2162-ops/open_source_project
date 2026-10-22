@@ -236,7 +236,7 @@ def _drop(
     monkeypatch.setattr("app.config.BATCHES_DIR", tmp_path / "batches")
     monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
     chosen = provider or StubProvider({"first_name": ["שרה"]})
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (chosen, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (chosen, ""))
     if parallel is not None:
         monkeypatch.setattr(
             pipeline, "SETTINGS", replace(pipeline.SETTINGS, max_parallel_calls=parallel)
@@ -302,7 +302,7 @@ def test_a_rejected_file_does_not_sink_the_others(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.BATCHES_DIR", tmp_path / "batches")
     monkeypatch.setattr("app.store.BATCHES_DIR", tmp_path / "batches")
     monkeypatch.setattr(
-        pipeline, "build_reader", lambda: (StubProvider({"first_name": ["שרה"]}), "")
+        pipeline, "build_reader", lambda *_a, **_k: (StubProvider({"first_name": ["שרה"]}), "")
     )
 
     batch = Batch(batch_id="bat_mixed")

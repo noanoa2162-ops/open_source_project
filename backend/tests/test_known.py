@@ -48,7 +48,7 @@ def _png(tmp_path: Path, name: str, shade: int, size=(60, 80)) -> Path:
 
 
 def _upload(monkeypatch, batch_id: str, files: list[Path], provider) -> Batch:
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (provider, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (provider, ""))
     batch = Batch(batch_id=batch_id)
     for position, path in enumerate(files, start=1):
         batch.sources.append(SourceFile(index=position, filename=path.name, kind="png"))

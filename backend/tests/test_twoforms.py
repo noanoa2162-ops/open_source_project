@@ -33,7 +33,7 @@ class Counting:
 
 
 def _upload(monkeypatch, reader) -> Batch:
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (reader, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (reader, ""))
     batch = Batch(batch_id="bat_two")
     batch.sources.append(SourceFile(index=1, filename="page.png", kind="png"))
     Image.new("RGB", (100, 200), "white").save(store.source_dir("bat_two", 1) / "source", format="PNG")
@@ -71,7 +71,7 @@ def test_never_split_by_itself(monkeypatch):
 
 def test_the_secretary_splits_for_free_by_position(monkeypatch):
     reader = Counting({})
-    monkeypatch.setattr(pipeline, "build_reader", lambda: (reader, ""))
+    monkeypatch.setattr(pipeline, "build_reader", lambda *_a, **_k: (reader, ""))
     record = _two_on_page()
     batch = store.get("bat_man")
 
