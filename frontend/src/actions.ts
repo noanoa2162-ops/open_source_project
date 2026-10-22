@@ -1327,7 +1327,27 @@ function helpError(text: string, focus: string) {
   afterRender(() => $(focus)?.focus());
 }
 
-export async function helpSend(channel: 'gmail' | 'outlook' | 'mail' | 'whatsapp' | 'copy') {
+// שליחה ישירה מהשרת (mailer.py), בלי לפתוח את Gmail: השרת כותב את ההודעה, הדפדפן רק אומר למי
+async function helpDirect(to: string) {
+  if (!EMAIL_RE.test(to)) return helpError('כתבי למי לשלוח — כתובת המייל של הממונה.', '#haTo');
+  S.help.busy = 'direct';
+  emit();
+  const url = await helpLink();
+  if (!url) { S.help.busy = ''; return emit(); }
+  const res = await fetch('/api/records/' + S.help.rec + '/help/mail', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ field: S.help.key, to }),
+  }).catch(() => null);
+  S.help.busy = '';
+  const d = res ? await res.json().catch(() => ({})) : {};
+  if (!res || !res.ok) return helpError(d.detail || 'המייל לא נשלח. נסי שוב, או פתחי מייל מוכן ב-Gmail.', '#haDirect');
+  remember5('helpTo', to);
+  helpStep(true, 'sent:' + to);
+  toast('🙋 המייל נשלח — השדה ממתין לתשובה');
+}
+
+export async function helpSend(channel: 'direct' | 'gmail' | 'outlook' | 'mail' | 'whatsapp' | 'copy') {
+  if (channel === 'direct') return helpDirect(S.help.to.trim());
   if (!S.help.rec) return;
   S.help.err = '';
   const to = S.help.to.trim();

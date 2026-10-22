@@ -331,10 +331,17 @@ function HelpAsk() {
                 <input id="haTo" type="email" dir="ltr" list="haToList" maxLength={120} placeholder="name@example.com" autoComplete="email"
                   value={H.to} onChange={(e) => set('to', e.target.value)} />
                 <datalist id="haToList">{recentList('helpTo')}</datalist>
+                {S.config && S.config.mail_send ? (
+                  <div className="hasend">
+                    <Btn className="primary" id="haDirect" disabled={busy('direct')} onClick={() => helpSend('direct')}>
+                      {busy('direct') ? 'שולח…' : '📨 שליחה עכשיו'}</Btn>
+                    <span className="hasendlbl">המייל יוצא מהאתר — בלי לפתוח את Gmail</span>
+                  </div>
+                ) : null}
                 <div className="hasend">
-                  <span className="hasendlbl">פתיחת מייל מוכן ב:</span>
-                  <Btn className="primary" id="haGmail" disabled={busy('gmail')} onClick={() => helpSend('gmail')}>Gmail</Btn>
-                  <Btn className="primary" id="haOutlook" disabled={busy('outlook')} onClick={() => helpSend('outlook')}>Outlook</Btn>
+                  <span className="hasendlbl">{S.config && S.config.mail_send ? 'או פתיחת מייל מוכן ב:' : 'פתיחת מייל מוכן ב:'}</span>
+                  <Btn className={S.config && S.config.mail_send ? 'secondary' : 'primary'} id="haGmail" disabled={busy('gmail')} onClick={() => helpSend('gmail')}>Gmail</Btn>
+                  <Btn className={S.config && S.config.mail_send ? 'secondary' : 'primary'} id="haOutlook" disabled={busy('outlook')} onClick={() => helpSend('outlook')}>Outlook</Btn>
                   <Btn className="secondary" id="haMail" disabled={busy('mail')} title="תוכנת המייל שמותקנת במחשב — רק אם יש כזו" onClick={() => helpSend('mail')}>תוכנת מייל</Btn>
                 </div>
               </div>
@@ -394,6 +401,7 @@ function DoneText() {
   if (t === 'copied') return <>✓ <b>הקישור הועתק.</b> הדביקי אותו בהודעה לממונה (Ctrl+V).</>;
   if (t === 'copyit') return <b>העתיקי את הקישור:</b>;
   const [channel, who] = [t.slice(0, t.indexOf(':')), t.slice(t.indexOf(':') + 1)];
+  if (channel === 'sent') return <>✓ <b>המייל נשלח אל <bdi dir="ltr">{who}</bdi>.</b> כשהממונה יענה, התשובה תופיע כאן ליד השדה.</>;
   if (channel === 'mail') return <>✓ <b>ביקשנו מהמחשב לפתוח את תוכנת המייל</b> עם הודעה אל <bdi dir="ltr">{who}</bdi>. לחצי שם "שליחה".</>;
   const where = channel === 'gmail' ? 'ב-Gmail' : channel === 'outlook' ? 'ב-Outlook' : 'בוואטסאפ';
   const target = channel === 'whatsapp'

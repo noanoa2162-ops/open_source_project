@@ -222,3 +222,100 @@ def test_in_the_cloud_the_help_table_is_created_when_missing(monkeypatch):
     db._help_conn()
     assert not any("CREATE" in s for s in there.sql) and db._HELP_READY is True
     assert len(there.sql) == 1, "אחרי שנמצאה — בלי בדיקה נוספת"
+
+
+# ---------- 22/10/2026: "📨 שליחה עכשיו" — המייל יוצא מהשרת, בלי לפתוח את Gmail
+
+class _FakeSMTP:
+    sent: list = []
+    fail_login = False
+
+    def __init__(self, host, port, timeout=None, context=None):
+        self.host, self.port = host, port
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def login(self, user, password):
+        import smtplib
+        if _FakeSMTP.fail_login:
+            raise smtplib.SMTPAuthenticationError(535, b"bad")
+        self.user = user
+
+    def send_message(self, message):
+        _FakeSMTP.sent.append(message)
+
+
+@pytest.fixture
+def smtp(monkeypatch):
+    from app import mailer
+    monkeypatch.setenv("SMTP_USER", "noa@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-password")
+    monkeypatch.delenv("HELP_MAIL_ALLOWED", raising=False)
+    monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", _FakeSMTP)
+    monkeypatch.setattr(mailer, "_SENT", {})
+    monkeypatch.setattr(mailer, "_RECENT", [])
+    _FakeSMTP.sent, _FakeSMTP.fail_login = [], False
+    return _FakeSMTP
+
+
+def test_the_server_sends_the_help_mail_with_only_the_link(smtp):
+    client, record = _client(), _record()
+    token = _ask(client, record)
+    res = client.post(f"/api/records/{record.record_id}/help/mail", json={"field": "national_id", "to": "boss@example.com"})
+    assert res.status_code == 200, res.text
+    message = smtp.sent[0]
+    body = message.get_content()
+    assert message["To"] == "boss@example.com" and "noa@example.com" in message["From"]
+    assert "תעודת זהות" in message["Subject"] and f"/help/{token}" in body and "רחל" in body
+    # בלי פרטי מטופל: לא שם, לא ת"ז, לא מזהה טופס
+    assert "שרה" not in body and "כהן" not in body and "011223344" not in body and record.record_id not in body
+
+
+def test_no_mail_without_an_open_request_or_to_a_bad_address(smtp):
+    client, record = _client(), _record()
+    assert client.post(f"/api/records/{record.record_id}/help/mail",
+                       json={"field": "national_id", "to": "boss@example.com"}).status_code == 409
+    _ask(client, record)
+    assert client.post(f"/api/records/{record.record_id}/help/mail",
+                       json={"field": "national_id", "to": "not an address"}).status_code == 502
+    assert smtp.sent == []
+
+
+def test_only_allowed_recipients_and_a_few_sends_per_request(smtp, monkeypatch):
+    monkeypatch.setenv("HELP_MAIL_ALLOWED", "@lab.example, chief@other.example")
+    client, record = _client(), _record()
+    _ask(client, record)
+    send = lambda to: client.post(f"/api/records/{record.record_id}/help/mail", json={"field": "national_id", "to": to})
+    assert send("stranger@gmail.com").status_code == 502, "כתובת שלא ברשימה — לא נשלח"
+    assert send("chief@other.example").status_code == 200 and send("a@lab.example").status_code == 200
+    assert send("b@lab.example").status_code == 200
+    assert send("c@lab.example").status_code == 502, "עד 3 שליחות לבקשה"
+    assert len(smtp.sent) == 3
+
+
+def test_a_wrong_password_says_what_to_do_and_does_not_count(smtp):
+    smtp.fail_login = True
+    client, record = _client(), _record()
+    _ask(client, record)
+    res = client.post(f"/api/records/{record.record_id}/help/mail", json={"field": "national_id", "to": "boss@example.com"})
+    assert res.status_code == 502 and "App Password" in res.json()["detail"]
+    from app import mailer
+    assert not any(mailer._SENT.values())
+
+
+def test_direct_sending_is_off_until_configured_and_on_a_public_site_needs_a_list(monkeypatch):
+    from app import mailer
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    assert not mailer.available() and _client().get("/api/config").json()["mail_send"] is False
+    monkeypatch.setenv("SMTP_USER", "noa@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-password")
+    monkeypatch.setattr(mailer, "_public", lambda: True)
+    monkeypatch.delenv("HELP_MAIL_ALLOWED", raising=False)
+    assert not mailer.available(), "אתר ציבורי בלי רשימת נמענים — אסור: כל אחד היה שולח בשמך"
+    monkeypatch.setenv("HELP_MAIL_ALLOWED", "@lab.example")
+    assert mailer.available()

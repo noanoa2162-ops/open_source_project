@@ -14,12 +14,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from app import db, gold, halves, pipeline, rules, store, twoforms
+from app import db, gold, halves, mailer, pipeline, rules, store, twoforms
 from app.config import PROJECT_ROOT, SETTINGS
 from app.cloud import enabled as cloud_enabled
 from app.crops import crop_field, padded
@@ -108,6 +108,8 @@ def config() -> dict:
         # comes from the validated deployment origin, never from localhost or a
         # preview/request Host header.
         "public_origin": os.environ.get("APP_ORIGIN", "").rstrip("/") if cloud_enabled() else "",
+        # "🙋 עזרה" נשלח ישירות מהשרת (mailer.py) — רק כשהוגדר חשבון מייל בשרת
+        "mail_send": mailer.available(),
         "brand": SETTINGS.brand,
         "fields": [
             {"key": f.key, "label": f.label_he, "multi": f.multi, "hint": f.hint_he}
@@ -400,6 +402,41 @@ def _view(views: list, index: int) -> tuple[float, float, float, float] | None:
     if x1 - x0 < 0.005 or y1 - y0 < 0.005:  # אזור ריק או הפוך
         return None
     return (x0, y0, x1, y1)
+
+
+@app.post("/api/records/{record_id}/help/mail")
+def mail_help(record_id: str, payload: dict, request: Request) -> dict:
+    """Send the help e-mail from the server (mailer.py), for a request that already exists.
+    The server writes the message — the browser only says to whom."""
+    key = str(payload.get("field", ""))
+    to = str(payload.get("to", "")).strip()[:120]
+    active = db.help_active([record_id]).get((record_id, key))
+    if active is None or active["status"] != "open" or active["expired"]:
+        raise HTTPException(409, "אין בקשת עזרה פתוחה לשדה הזה — צרי אותה שוב.")
+    origin = os.environ.get("APP_ORIGIN", "").rstrip("/") if cloud_enabled() else str(request.base_url).rstrip("/")
+    if not origin:
+        raise HTTPException(409, "כתובת האתר לא מוגדרת בשרת (APP_ORIGIN) — הקישור במייל לא היה עובד.")
+    link = origin + "/help/" + quote(active["token"])
+    label = FIELDS_BY_KEY[key].label_he if key in FIELDS_BY_KEY else key
+    try:
+        mailer.send(active["token"], to, f'בקשת עזרה בבדיקת טופס — שדה "{label}"',
+                    _help_mail_body(active["asker"], label, active["question"], link))
+    except mailer.MailRefused as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"sent": to}
+
+
+def _help_mail_body(asker: str, label: str, question: str, link: str) -> str:
+    """The same wording as the screen's ready e-mail (actions.ts → helpMessage). No patient details."""
+    lines = ["שלום,", "", (asker or "המזכירה") + " מבקשת את עזרתך בבדיקת טופס התחייבות.", "",
+             "השדה: " + label]
+    if question:
+        lines.append("השאלה: " + question)
+    lines += ["", "לצפייה בתקריב ולתשובה בלחיצה אחת:", link,
+              "התשובה נכנסת ישר למערכת. הקישור בתוקף 48 שעות.", "",
+              "מטעמי פרטיות, פרטי המטופל מוצגים רק בקישור — לא בהודעה.", "",
+              "תודה,", "מערכת קליטת טפסי התחייבות · המעבדה המרכזית לנגיפים"]
+    return "\n".join(lines)
 
 
 @app.post("/api/records/{record_id}/help/cancel")
