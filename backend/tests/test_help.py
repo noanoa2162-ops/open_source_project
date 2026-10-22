@@ -319,3 +319,78 @@ def test_direct_sending_is_off_until_configured_and_on_a_public_site_needs_a_lis
     assert not mailer.available(), "אתר ציבורי בלי רשימת נמענים — אסור: כל אחד היה שולח בשמך"
     monkeypatch.setenv("HELP_MAIL_ALLOWED", "@lab.example")
     assert mailer.available()
+
+
+# ---------- 22/10/2026: שליחה דרך Brevo (בחירת נועה) — מפתח אחד וכתובת שולח מאומתת
+
+@pytest.fixture
+def brevo(monkeypatch):
+    import io
+    import json
+    import urllib.error
+    from app import mailer
+    monkeypatch.setenv("BREVO_API_KEY", "xkeysib-test")
+    monkeypatch.setenv("MAIL_FROM", "noa@example.com")
+    monkeypatch.setenv("SMTP_USER", "smtp-not-used@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "not-used")
+    monkeypatch.delenv("HELP_MAIL_ALLOWED", raising=False)
+    monkeypatch.setattr(mailer, "_SENT", {})
+    monkeypatch.setattr(mailer, "_RECENT", [])
+    monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", lambda *a, **k: pytest.fail("Brevo מוגדר — לא שולחים ב-Gmail"))
+    calls = {"sent": [], "fail": None}
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(request, timeout=None):
+        if calls["fail"]:
+            code, text = calls["fail"]
+            raise urllib.error.HTTPError(request.full_url, code, "err", {}, io.BytesIO(text.encode()))
+        calls["sent"].append((request.full_url, dict(request.header_items()), json.loads(request.data)))
+        return Response()
+
+    monkeypatch.setattr(mailer.urllib.request, "urlopen", urlopen)
+    return calls
+
+
+def test_brevo_sends_the_help_mail_with_only_the_link(brevo):
+    client, record = _client(), _record()
+    token = _ask(client, record)
+    res = client.post(f"/api/records/{record.record_id}/help/mail", json={"field": "national_id", "to": "boss@example.com"})
+    assert res.status_code == 200, res.text
+    url, headers, payload = brevo["sent"][0]
+    assert url == "https://api.brevo.com/v3/smtp/email" and headers["Api-key"] == "xkeysib-test"
+    assert payload["sender"]["email"] == "noa@example.com" and payload["to"] == [{"email": "boss@example.com"}]
+    assert f"/help/{token}" in payload["textContent"] and "תעודת זהות" in payload["subject"]
+    assert "שרה" not in payload["textContent"] and "011223344" not in payload["textContent"]
+
+
+@pytest.mark.parametrize("code, text, says", [
+    (400, '{"code":"invalid_parameter","message":"sender not valid"}', "MAIL_FROM"),
+    (401, '{"code":"unauthorized","message":"Key not found"}', "BREVO_API_KEY"),
+])
+def test_brevo_errors_say_what_to_fix_and_do_not_count(brevo, code, text, says):
+    brevo["fail"] = (code, text)
+    client, record = _client(), _record()
+    _ask(client, record)
+    res = client.post(f"/api/records/{record.record_id}/help/mail", json={"field": "national_id", "to": "boss@example.com"})
+    assert res.status_code == 502 and says in res.json()["detail"]
+    from app import mailer
+    assert not any(mailer._SENT.values())
+
+
+def test_brevo_alone_turns_direct_sending_on(monkeypatch):
+    from app import mailer
+    for name in ("SMTP_USER", "SMTP_PASSWORD", "HELP_MAIL_ALLOWED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BREVO_API_KEY", "xkeysib-test")
+    monkeypatch.delenv("MAIL_FROM", raising=False)
+    assert not mailer.available(), "בלי כתובת שולח — כבוי"
+    monkeypatch.setenv("MAIL_FROM", "noa@example.com")
+    assert mailer.available()
