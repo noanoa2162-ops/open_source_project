@@ -18,7 +18,7 @@ import os
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
@@ -65,16 +65,36 @@ READ_CACHE_DIR = WORK_DIR / "read_cache"
 _REREAD_LOCK = threading.Lock()
 
 
+# הקורא נבנה פעם אחת ומשמש את כל ההעלאות: טעינת ספריית Anthropic לקחה 9–13 שניות בהעלאה
+# הראשונה, ויצירת חיבור חדש עוד כ-1.6 שניות בכל העלאה (נמדד 21/10/2026). הקורא לא שומר מצב
+# בין קריאות. מפתח אחר, מודל אחר או רמת חשיבה אחרת — קורא חדש.
+_READERS: dict[tuple, ExtractionProvider] = {}
+_READERS_LOCK = threading.Lock()
+
+
 def build_reader() -> tuple[ExtractionProvider | None, str]:
     """The reader configured in .env, or None and a visible reason why not."""
-    from app.providers.claude_vision import ClaudeExtractionProvider
+    key = (SETTINGS.reader_model, SETTINGS.anthropic_api_key, SETTINGS.claude_effort)
+    with _READERS_LOCK:
+        if key in _READERS:
+            return _READERS[key], ""
+        from app.providers.claude_vision import ClaudeExtractionProvider
 
+        try:
+            reader = ClaudeExtractionProvider(model=key[0], api_key=key[1], effort=key[2])
+        except ExtractionError as exc:
+            return None, str(exc)
+        _READERS[key] = reader
+        return reader, ""
+
+
+def warm_up() -> None:
+    """Load the reader in the background when the server starts, so the first upload
+    does not wait for it. Any problem shows up later, on the upload itself."""
     try:
-        return ClaudeExtractionProvider(
-            model=SETTINGS.reader_model, api_key=SETTINGS.anthropic_api_key, effort=SETTINGS.claude_effort
-        ), ""
-    except ExtractionError as exc:
-        return None, str(exc)
+        build_reader()
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
 
 
 class Reader:
@@ -131,28 +151,33 @@ def _process(batch_id: str) -> None:
     batch.status = "processing"
     started = time.perf_counter()
 
-    # שלב 1: לרנדר הכול תחילה, כדי שמספר הטפסים יהיה ידוע לפני הקריאה הראשונה.
-    pages = _render_all(batch_id, batch)
+    # הכנת העמודים והקריאה חופפות: כל עמוד נשלח לקריאה ברגע שהוא מוכן, בלי לחכות לשאר
+    # (נמדד 21/10/2026: 30 עמודים חיכו קודם כדקה וחצי לפני הקריאה הראשונה).
+    provider, problem = build_reader()
+    reading = _Reading(Reader(provider), batch) if provider is not None else None
+    # בענן מצב ההעלאה נשמר ל-DB אחרי כל עמוד (checkpoint) — שם הקריאה מתחילה אחרי שכל העמודים
+    # מוכנים, כדי שהשמירה לא תרוץ בזמן שעמודים חדשים עוד נוספים. הכנת העמודים עצמה מקבילה גם שם.
+    overlap = reading is not None and not cloud_enabled()
+    pages = _render_all(batch_id, batch, on_ready=reading.submit if overlap else None)
     batch.total_pages = len(pages)
-    batch.pages = [
-        {"source_index": s.index, "page_number": n, "status": PAGE_QUEUED, "record_id": ""}
-        for s, n, _ in pages
-    ]
     checkpoint(batch)
     if not pages:
+        if reading:
+            reading.finish()
         batch.status = "failed"
         batch.error = _why_nothing_to_do(batch.sources)
         return
 
-    provider, problem = build_reader()
-    if provider is None:
+    if reading is None:
         batch.status = "failed"
         batch.error = problem or "אין מודל זמין לקריאה."
         return
 
-    # שלב 2: כמה טפסים במקביל.
-    reader = Reader(provider)
-    _extract_all(reader, batch, pages)
+    if not overlap:
+        for index, page in enumerate(pages):
+            reading.submit(index, page)
+    reader = reading.reader
+    reading.finish()
     batch.seconds = round(time.perf_counter() - started, 1)
 
     if reader.retired:
@@ -176,66 +201,101 @@ def _process(batch_id: str) -> None:
 
 
 def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRecord | None]:
-    """Run every page through the reader with a small pool of threads.
+    """Run every page through the reader with a small pool of threads (all pages known
+    up front). Same as the overlapping path in `_process`, which submits each page the
+    moment it is ready. Returns the records in page order — a slot is None when that page
+    was never attempted (the reader was retired, or the cost cap was reached)."""
+    reading = _Reading(reader, batch)
+    for index, page in enumerate(pages):
+        reading.submit(index, page)
+    return reading.finish()
 
-    Each record joins `batch.records` the moment it is ready, so the screen can
-    show it while the rest are still being read; at the end they are put back in
-    page order. Returns the records in page order too — a slot is None when that
-    page was never attempted (the reader was retired, or the cost cap was reached).
-    Only the calling thread adds records to `batch`; workers only mark their own
-    page's status.
+
+class _Reading:
+    """Reads pages as they arrive, with `max_parallel_calls` at a time.
+
+    Each record joins `batch.records` the moment it is ready, so the screen can show it
+    while the rest are still being read; `finish()` waits for all of them and puts them
+    back in page order (before the halves are joined). `index` is the page's place in
+    `batch.pages`. One page that fails — for any reason — becomes a record with `error`;
+    it never stops the others.
     """
-    stop = threading.Event()
-    spent = [0.0]
-    spent_lock = threading.Lock()
-    results: list[FormRecord | None] = [None] * len(pages)
 
-    def work(index: int) -> tuple[int, FormRecord | None, str]:
-        if stop.is_set() or reader.exhausted:
+    def __init__(self, reader: Reader, batch: Batch) -> None:
+        self.reader = reader
+        self.batch = batch
+        self.stop = threading.Event()
+        self.spent = 0.0
+        self.lock = threading.Lock()
+        self.results: dict[int, FormRecord | None] = {}
+        self.futures = []
+        self.pool = ThreadPoolExecutor(max_workers=SETTINGS.max_parallel_calls)
+
+    def submit(self, index: int, page: Page) -> None:
+        future = self.pool.submit(self._work, index, page)
+        future.add_done_callback(self._collect)
+        self.futures.append(future)
+
+    def _work(self, index: int, page: Page) -> tuple[int, FormRecord | None, str]:
+        reader, batch = self.reader, self.batch
+        if self.stop.is_set() or reader.exhausted:
             return index, None, "stopped"
-        with spent_lock:
+        with self.lock:
             cap = SETTINGS.max_cost_per_batch_usd  # 0 = בלי תקרה
-            if cap > 0 and spent[0] >= cap:
+            if cap > 0 and self.spent >= cap:
                 return index, None, "budget"
-        source, page_number, image_path = pages[index]
+        source, page_number, image_path = page
         if index < len(batch.pages):
             batch.pages[index]["status"] = PAGE_READING
-        record = read_form(reader, image_path, batch.batch_id, source, page_number)
-        if record.upside_down:
-            show_upright(record, image_path)
-        with spent_lock:
-            spent[0] += record.cost_usd or 0.0
+        try:
+            record = read_form(reader, image_path, batch.batch_id, source, page_number)
+            if record.upside_down:
+                show_upright(record, image_path)
+        except Exception as exc:  # noqa: BLE001 - עמוד אחד שנכשל לא מפיל את ההעלאה
+            record = FormRecord.empty(batch.batch_id, source, page_number)
+            record.error = f"קריאת העמוד נכשלה ({type(exc).__name__})"
+            for field in record.fields.values():
+                field.flag("missing")
+            log_failure(batch.batch_id, source, page_number, exc)
+        with self.lock:
+            self.spent += record.cost_usd or 0.0
         if reader.exhausted:
             # חייב להיעשות כאן ולא בתהליך הראשי, אחרת עובד כבר תפס את העמוד הבא.
-            stop.set()
+            self.stop.set()
         return index, record, ""
 
-    with ThreadPoolExecutor(max_workers=SETTINGS.max_parallel_calls) as pool:
-        futures = [pool.submit(work, i) for i in range(len(pages))]
-        for future in as_completed(futures):
-            index, record, why = future.result()
+    def _collect(self, future) -> None:
+        index, record, why = future.result()
+        batch = self.batch
+        with self.lock:
             status = batch.pages[index] if index < len(batch.pages) else {}
             if record is None:
                 status["status"] = PAGE_SKIPPED
+                self.results[index] = None
                 if why == "budget":
                     batch.budget_skipped_pages += 1
-                continue
-            results[index] = record
+                return
+            self.results[index] = record
             batch.records.append(record)  # מופיע במסך מיד, לא רק בסוף
             status.update(status=PAGE_FAILED if record.error else PAGE_DONE, record_id=record.record_id)
             batch.processed_pages += 1
             checkpoint(batch)
 
-    # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
-    order = {id(record): i for i, record in enumerate(results) if record is not None}
-    batch.records.sort(key=lambda record: order.get(id(record), len(order)))
-
-    if batch.budget_skipped_pages:
-        batch.warn(
-            f"נעצר בתקרת התקציב (${SETTINGS.max_cost_per_batch_usd:.2f}): "
-            f"{batch.budget_skipped_pages} טפסים לא עובדו. ניתן לשנות את MAX_COST_PER_BATCH_USD."
-        )
-    return results
+    def finish(self) -> list[FormRecord | None]:
+        self.pool.shutdown(wait=True)
+        for future in self.futures:
+            future.result()  # תקלה בקוד עצמו (לא בקריאה) — גלויה, כמו קודם
+        count = len(self.futures)
+        results = [self.results.get(i) for i in range(count)]
+        # בסוף — חזרה לסדר העמודים, כמו שהם הופיעו בקבצים
+        order = {id(record): i for i, record in enumerate(results) if record is not None}
+        self.batch.records.sort(key=lambda record: order.get(id(record), len(order)))
+        if self.batch.budget_skipped_pages:
+            self.batch.warn(
+                f"נעצר בתקרת התקציב (${SETTINGS.max_cost_per_batch_usd:.2f}): "
+                f"{self.batch.budget_skipped_pages} טפסים לא עובדו. ניתן לשנות את MAX_COST_PER_BATCH_USD."
+            )
+        return results
 
 
 def read_form(
@@ -487,6 +547,17 @@ def _turned(region: Region) -> Region:
     return (1 - x1, 1 - y1, 1 - x0, 1 - y0)
 
 
+def _enlarged_note(image_path: Path) -> str:
+    """'enlarged-2000' when this page is sent to the model enlarged, else ''."""
+    from app.providers.claude_vision import MIN_LONG_SIDE, fit_scale
+
+    try:
+        with Image.open(image_path) as page:
+            return f"enlarged-{MIN_LONG_SIDE}" if fit_scale(*page.size) > 1 else ""
+    except OSError:
+        return ""
+
+
 def _read(
     reader: ExtractionProvider, image_path: Path, source: SourceFile, page_number: int
 ) -> RawExtraction:
@@ -499,6 +570,9 @@ def _read(
     )
     turned = turn_note(image_path)
     extra = (turned,) if turned else ()
+    # תמונה קטנה נשלחת עכשיו מוגדלת (claude_vision.MIN_LONG_SIDE) — תשובה ישנה, מהתמונה הקטנה, לא נלקחת
+    enlarged = _enlarged_note(image_path)
+    extra += (enlarged,) if enlarged else ()
     if not source.sha256:
         return reader.extract(image_path)
 
@@ -587,11 +661,12 @@ def _is_low_resolution(image_path: Path) -> bool:
         return False
 
 
-def _render_all(batch_id: str, batch: Batch) -> list[Page]:
+def _render_all(batch_id: str, batch: Batch, on_ready=None) -> list[Page]:
     """Flatten every accepted file into one ordered list of pages.
 
     The page cap applies to the whole drop, not to each file, because every
-    page is a paid model call.
+    page is a paid model call. `on_ready(index, page)` is called the moment each
+    page is ready (in page order) — `index` is its place in `batch.pages`.
     """
     budget = SETTINGS.max_pages_per_batch
     flattened: list[Page] = []
@@ -608,10 +683,15 @@ def _render_all(batch_id: str, batch: Batch) -> list[Page]:
             continue
         try:
             def found(number: int, path: Path, source: SourceFile = source) -> None:
-                # כל עמוד שמוכן נספר מיד — המסך סופר 1, 2, 3 כבר בזמן הזיהוי
+                # כל עמוד שמוכן נספר מיד — המסך סופר 1, 2, 3 כבר בזמן הזיהוי — ונשלח לקריאה
+                page = (source, number, path)
+                index = len(flattened)
+                flattened.append(page)
                 batch.pages.append({"source_index": source.index, "page_number": number,
                                     "status": PAGE_QUEUED, "record_id": ""})
                 batch.found_pages += 1
+                if on_ready:
+                    on_ready(index, page)
 
             written, in_file = render_pages(
                 source_dir(batch_id, source.index) / "source",
@@ -629,8 +709,6 @@ def _render_all(batch_id: str, batch: Batch) -> list[Page]:
             # הקובץ נקטע באמצע בגלל התקרה — חייב להיות גלוי, לא להיעלם בשקט.
             batch.skipped_pages += in_file - len(written)
         budget -= len(written)
-        for page_number, image_path in enumerate(written, start=1):
-            flattened.append((source, page_number, image_path))
 
     return flattened
 

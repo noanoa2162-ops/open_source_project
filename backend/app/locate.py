@@ -359,16 +359,41 @@ def snap_to_ink(record: FormRecord, image_path: Path) -> None:
             page = page.convert("RGB")
             for key in targets:
                 field = record.fields[key]
-                snapped = ink_region(page, field.region)
+                snapped = ink_region(page, field.region, nearby=key in INK_GROUPS)
+                if snapped is not None and _on_other_field(record, key, snapped):
+                    snapped = None  # הדיו הקרוב הוא של שדה אחר (ת"ז ליד השם) — התיבה נשארת של המנוע
                 if snapped is not None:
                     field.region = snapped
-                    field.value_regions = [ink_region(page, r) or r if r else None for r in field.value_regions]
+                    field.value_regions = [ink_region(page, r, nearby=key in INK_GROUPS) or r if r else None for r in field.value_regions]
                     field.region_note = INKED
     except OSError:
         return
 
 
-def ink_region(page: Image.Image, region: Region) -> Region | None:
+# שדות שכתובים יחד (שם פרטי ושם משפחה) רשאים לחלוק דיו; ת"ז ותאריך — לא עם אף שדה אחר
+INK_GROUPS = {"first_name": "name", "last_name": "name"}
+OTHER_INK_SHARE = 0.4  # חלק מהתיבה החדשה שנמצא על שדה אחר — מעבר לזה, זה הדיו שלו
+
+
+def _on_other_field(record: FormRecord, key: str, box: Region) -> bool:
+    """Whether a snapped box landed mostly on the pen strokes of a different field —
+    on a small image, an ID box the reader placed beside the name was pulled onto the name."""
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    group = INK_GROUPS.get(key, key)
+    for other in INK_FIELDS:
+        region = record.fields[other].region
+        if other == key or INK_GROUPS.get(other, other) == group or not region or not record.fields[other].values:
+            continue
+        w = min(box[2], region[2]) - max(box[0], region[0])
+        h = min(box[3], region[3]) - max(box[1], region[1])
+        if area > 0 and w > 0 and h > 0 and w * h / area > OTHER_INK_SHARE:
+            return True
+    return False
+
+
+def ink_region(page: Image.Image, region: Region, nearby: bool = True) -> Region | None:
+    """`nearby=False`: only ink that overlaps the box. Without it an ID box beside the name
+    (small image, imprecise reader box) jumped to the closest ink — the name."""
     width, height = page.size
     x0, y0, x1, y1 = region[0] * width, region[1] * height, region[2] * width, region[3] * height
     bw, bh = max(x1 - x0, 20), max(y1 - y0, 20)
@@ -393,6 +418,8 @@ def ink_region(page: Image.Image, region: Region) -> Region | None:
     bx0, bx1 = (x0 - left) / INK_STEP, (x1 - left) / INK_STEP
     chosen = [run for run in runs
               if min(run[1], bx1) - max(run[0], bx0) >= 0.3 * min(run[1] - run[0] + 1, bx1 - bx0)]
+    if not chosen and not nearby:
+        return None
     if not chosen:
         center = (bx0 + bx1) / 2
         near = min(runs, key=lambda run: abs((run[0] + run[1]) / 2 - center))

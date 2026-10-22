@@ -48,10 +48,13 @@ class SplitRefused(Exception):
 def join_halves(batch: Batch) -> int:
     """Join every clear top/bottom pair in the batch. Returns how many were joined."""
     joined = 0
-    for bottom in [r for r in batch.records if _is_bottom(batch, r)]:
+    # טופס שהמזכירה כבר תיקנה (בזמן שהשאר עוד נקראו) — לא מחברים לבד, כדי לא לדרוס את התיקון.
+    # חיבור ידני ("חבר עם חלק אחר") עדיין אפשרי.
+    untouched = [r for r in batch.records if r.version == 0]
+    for bottom in [r for r in untouched if _is_bottom(batch, r)]:
         if bottom not in batch.records:
             continue
-        tops = [t for t in batch.records if t is not bottom and _fits(batch, t, bottom)]
+        tops = [t for t in batch.records if t is not bottom and t.version == 0 and _fits(batch, t, bottom)]
         if _is_pdf(batch, bottom):
             tops = [t for t in tops if _next_to(batch, t, bottom)]  # עמוד PDF — רק עם השכן הצמוד
         else:

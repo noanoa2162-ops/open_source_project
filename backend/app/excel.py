@@ -130,26 +130,8 @@ def build_workbook(batch: Batch) -> Workbook:
                     cell.fill = PatternFill("solid", fgColor=AMBER_FILL)
                     cell.font = Font(color=AMBER_TEXT)
 
-    _add_notice(ws, row_index + 2, batch, rows=row_index - 1)
+    # בלי שורות הערה מתחת לטבלה (החלטת נועה, 22/10/2026): הקובץ הוא רק הטבלה
     return wb
-
-
-def _add_notice(ws, row: int, batch: Batch, *, rows: int) -> None:
-    sources = len(batch.accepted_sources)
-    lines = [
-        "דמו להאקתון — מיועד לטפסי הדוגמה בלבד. אין להסתמך על הקובץ ללא בדיקה.",
-        f"מקור: {batch.display_name} · {sources} קבצים · {len(batch.records)} טפסים · "
-        f"{rows} שורות (שורה לכל מספר התחייבות) · "
-        f"{batch.review_total} שדות מסומנים לבדיקה",
-        "תאים כתומים דורשים בדיקה אנושית, כולל שדות ריקים. אין כאן טענת נכונות.",
-    ]
-    if batch.rejected_sources:
-        names = ", ".join(f"{s.filename} ({s.error})" for s in batch.rejected_sources)
-        lines.append(f"קבצים שלא עובדו: {names}")
-    for offset, text in enumerate(lines):
-        cell = ws.cell(row=row + offset, column=1, value=text)
-        cell.font = Font(size=10, color="5A6B7B", italic=offset > 0)
-        cell.alignment = Alignment(horizontal="right")
 
 
 def workbook_bytes(batch: Batch) -> bytes:

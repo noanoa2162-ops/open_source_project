@@ -61,7 +61,7 @@ def test_reading_and_fixing_save_nothing():
 
 
 def test_approval_saves_one_row_per_commitment_number():
-    batch = _batch("bat_b", {"first_name": ["שרה"], "national_id": ["012345678"],
+    batch = _batch("bat_b", {"first_name": ["שרה"], "national_id": ["012345674"],
                              "central_numbers": ["948023", "948024"], "commitment_numbers": ["0111", "0222"]})
     _approve(batch.records[0])
 
@@ -70,7 +70,7 @@ def test_approval_saves_one_row_per_commitment_number():
     assert [r["commitment_number"] for r in found["rows"]] == ["0111", "0222"]  # אפס מוביל נשמר
     assert {r["central_numbers"] for r in found["rows"]} == {"948023 | 948024"}  # מרכזיים יחד
     assert found["forms"] == 1 and found["total_rows"] == 2
-    assert all(r["national_id"] == "012345678" for r in found["rows"])
+    assert all(r["national_id"] == "012345674" for r in found["rows"])
 
 
 def test_form_without_commitment_number_is_one_row():
@@ -92,12 +92,12 @@ def test_approving_again_or_uploading_again_never_adds_rows():
 
 def test_approved_time_is_the_latest_approval(monkeypatch):
     batch = _batch("bat_t", {"first_name": ["שרה"], "commitment_numbers": ["1"]})
-    monkeypatch.setattr("app.db.now", lambda: "2026-10-20T08:00:00+00:00")
+    first, later = (TODAY + timedelta(hours=8)).isoformat(), (TODAY + timedelta(hours=9, minutes=30)).isoformat()
+    monkeypatch.setattr("app.db.now", lambda: first)  # היום — המסך טוען רק את היום
     _approve(batch.records[0])
-    monkeypatch.setattr("app.db.now", lambda: "2026-10-20T09:30:00+00:00")
+    monkeypatch.setattr("app.db.now", lambda: later)
     _approve(batch.records[0])
-    approval_day = {"start": "2026-10-20T00:00:00+00:00", "end": "2026-10-21T00:00:00+00:00"}
-    assert [r["approved_at"] for r in db.list_rows(**approval_day)["rows"]] == ["2026-10-20T09:30:00+00:00"]
+    assert [r["approved_at"] for r in db.list_rows(**RANGE)["rows"]] == [later]
 
 
 def test_a_fix_after_approval_replaces_the_rows():
@@ -151,17 +151,18 @@ def test_same_commitment_number_in_another_form_is_flagged_not_merged():
 
 
 def test_export_is_the_same_rows_as_text_with_formulas_neutralised():
-    batch = _batch("bat_k", {"first_name": ["=cmd"], "national_id": ["012345678"], "commitment_numbers": ["1", "2"]})
+    # שם כבר לא יכול להתחיל ב-"=" (rules.py) — הנוסחה נבדקת בגורם השולח
+    batch = _batch("bat_k", {"sending_entity": ["=cmd"], "national_id": ["012345674"], "commitment_numbers": ["1", "2"]})
     _approve(batch.records[0])
     client = _client()
 
     sheet = load_workbook(io.BytesIO(client.get("/api/saved/export", params={**RANGE, "format": "xlsx"}).content)).active
     rows = [[c.value for c in row] for row in sheet.iter_rows(min_row=2, max_row=3)]
-    assert [r[0] for r in rows] == ["'=cmd", "'=cmd"] and [r[6] for r in rows] == ["1", "2"]
-    assert rows[0][2] == "012345678"
+    assert [r[5] for r in rows] == ["'=cmd", "'=cmd"] and [r[6] for r in rows] == ["1", "2"]
+    assert rows[0][2] == "012345674"
 
     csv_text = client.get("/api/saved/export", params={**RANGE, "format": "csv"}).content.decode("utf-8-sig")
-    assert "'=cmd" in csv_text and "012345678" in csv_text
+    assert "'=cmd" in csv_text and "012345674" in csv_text
     data = json.loads(client.get("/api/saved/export", params={**RANGE, "format": "json"}).content)
     assert [d["commitment_number"] for d in data] == ["1", "2"]
 

@@ -106,7 +106,8 @@ def save_approved(record: FormRecord, source: SourceFile, page_png: Path,
     with _LOCK, _rows_conn(path) as conn:
         conn.execute(f"INSERT INTO approved_forms ({columns}) VALUES ({marks}) "
                      f"ON CONFLICT(form_key) DO UPDATE SET {updates}", row)
-        # אותו טופס מקובץ אחר (PDF/תמונה) — הגרסה הקודמת נמחקת; נשארת רק האחרונה (החלטת נועה, 20/10/2026)
+        # אותו טופס מקובץ אחר (PDF/תמונה) — הגרסה הקודמת נמחקת; נשארת רק האחרונה (החלטת נועה, 20/10/2026).
+        # רק בהתאמה מלאה של ת"ז (_same) — אחרת שני הטפסים נשמרים
         older = [f["form_key"] for f in _same(conn, record.fields["commitment_numbers"].values,
                                                record.fields["national_id"].values, exclude=key)]
         images = [kept for old in older for kept in _drop_form(conn, old)]
@@ -351,6 +352,15 @@ def _id_digits(values: list[str]) -> str:
     return "".join(ch for v in values for ch in v if ch.isdigit()).lstrip("0")
 
 
+def _sure_id(values: list[str]) -> str:
+    """The ID's digits when it is one fully read value, else "". A missing ID, a "?" or two
+    candidate IDs prove nothing about who the patient is."""
+    clean = [v.strip() for v in values if v.strip()]
+    if len(clean) != 1 or "?" in clean[0]:
+        return ""
+    return _id_digits(clean)
+
+
 def _split(value: str | None) -> list[str]:
     return [part.strip() for part in (value or "").split("|") if part.strip()]
 
@@ -384,9 +394,25 @@ def _same(conn: sqlite3.Connection, commitments: list[str], national_id: list[st
     marks = ", ".join("?" for _ in numbers)
     keys = [r["form_key"] for r in conn.execute(
         f"SELECT DISTINCT form_key FROM approved_rows WHERE commitment_number IN ({marks})", numbers)]
-    mine = _id_digits(national_id)
+    # אותו טופס רק כשהת"ז נקראה במלואה בשניהם וזהה. ת"ז חסרה, עם "?" או כפולה באחד מהם — לא
+    # מוכיח שזה אותו מטופל: לא ממלאים מהמערכת ולא מוחקים טופס שמור (תוקן 22/10/2026; קודם
+    # "ת"ז חסרה באחד מהם" נחשבה התאמה, והטופס החדש קיבל ערכים ירוקים של טופס שמור)
+    mine = _sure_id(national_id)
+    if not mine:
+        return []
     return [f for f in _forms(conn, [k for k in keys if k != exclude])
-            if not mine or not _id_digits(f["values"]["national_id"]) or _id_digits(f["values"]["national_id"]) == mine]
+            if _sure_id(f["values"]["national_id"]) == mine]
+
+
+def commitment_in_system(commitments: list[str], path: Path | None = None) -> bool:
+    """Whether an approved form with one of these commitment numbers is already saved."""
+    numbers = sorted({n.strip() for n in commitments if n.strip()})
+    if not numbers:
+        return False
+    marks = ", ".join("?" for _ in numbers)
+    with _LOCK, _rows_conn(path) as conn:
+        return conn.execute(
+            f"SELECT 1 FROM approved_rows WHERE commitment_number IN ({marks}) LIMIT 1", numbers).fetchone() is not None
 
 
 def saved_form(key: str, path: Path | None = None) -> dict | None:
@@ -637,3 +663,114 @@ def load_pending_batch(batch_id: str, path: Path | None = None) -> Batch | None:
     batch.sources.sort(key=lambda s: s.index)
     batch.total_pages = batch.processed_pages = batch.found_pages = len(batch.records)
     return batch
+
+
+# ------------------------------------------------------------ בקשות עזרה
+# המזכירה מתלבטת בשדה → שולחת לממונה קישור (בוואטסאפ/מייל). בהודעה עצמה אין פרטי מטופל —
+# רק קישור עם מפתח אקראי, שמציג את התקריב של השדה הזה בלבד. כל שאלה ותשובה נשמרות לתמיד
+# (מי שאל, מי ענה, מתי) — לא נמחקות. מצב: open (ממתין) → answered (נענה) → closed / canceled.
+
+HELP_DIR = WORK_DIR / "help_crops"
+
+_HELP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS help_requests (
+    token        TEXT PRIMARY KEY,
+    record_id    TEXT NOT NULL,
+    batch_id     TEXT NOT NULL,
+    field        TEXT NOT NULL,
+    question     TEXT NOT NULL DEFAULT '',
+    asker        TEXT NOT NULL DEFAULT '',
+    options      TEXT NOT NULL DEFAULT '[]',
+    crops        INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL,
+    answer_value TEXT NOT NULL DEFAULT '',
+    answer_note  TEXT NOT NULL DEFAULT '',
+    answered_by  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    answered_at  TEXT NOT NULL DEFAULT '',
+    closed_at    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS help_requests_record ON help_requests (record_id);
+"""
+
+HELP_ACTIVE = ("open", "answered")
+HELP_TTL_HOURS = 48  # קישור שלא נענה מפסיק לעבוד אחרי 48 שעות (החלטת נועה, 21/10/2026)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _help_conn(path: Path | None = None) -> sqlite3.Connection:
+    conn = _connect(path)
+    if cloud_enabled() and path is None:
+        return conn  # בענן הטבלה נוצרת ב-cloud/postgres.py (initialize)
+    conn.executescript(_HELP_SCHEMA)
+    return conn
+
+
+def _help_row(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    found = dict(row)
+    found["options"] = json.loads(found["options"] or "[]")
+    # בקשה שעוד ממתינה, אבל הקישור שלה כבר ישן מדי — לא נפתח ולא נענה
+    created = datetime.fromisoformat(found["created_at"])
+    found["expired"] = found["status"] == "open" and (_utcnow() - created).total_seconds() > HELP_TTL_HOURS * 3600
+    return found
+
+
+def help_create(token: str, record_id: str, batch_id: str, field: str, question: str, asker: str,
+                options: list[str], crops: int, path: Path | None = None) -> dict:
+    with _LOCK, _help_conn(path) as conn:
+        conn.execute(
+            "INSERT INTO help_requests (token, record_id, batch_id, field, question, asker, options, crops, "
+            "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+            (token, record_id, batch_id, field, question, asker, json.dumps(options, ensure_ascii=False),
+             crops, _utcnow().isoformat(timespec="seconds")))  # אותו שעון שבודק את התוקף
+        return _help_row(conn.execute("SELECT * FROM help_requests WHERE token = ?", (token,)).fetchone())
+
+
+def help_get(token: str, path: Path | None = None) -> dict | None:
+    with _LOCK, _help_conn(path) as conn:
+        return _help_row(conn.execute("SELECT * FROM help_requests WHERE token = ?", (token,)).fetchone())
+
+
+def help_active(record_ids: list[str], path: Path | None = None) -> dict[tuple[str, str], dict]:
+    """The latest open or answered request for each (form, field) — for the review screen."""
+    if not record_ids:
+        return {}
+    found: dict[tuple[str, str], dict] = {}
+    with _LOCK, _help_conn(path) as conn:
+        for start in range(0, len(record_ids), 500):
+            chunk = record_ids[start:start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in conn.execute(
+                    f"SELECT * FROM help_requests WHERE record_id IN ({marks}) AND status IN ('open', 'answered') "
+                    "ORDER BY created_at", chunk):
+                found[(row["record_id"], row["field"])] = _help_row(row)
+    return found
+
+
+def help_answer(token: str, value: str, note: str, name: str, path: Path | None = None) -> dict | None:
+    """Only a request still waiting can be answered — an answer never overwrites another."""
+    with _LOCK, _help_conn(path) as conn:
+        conn.execute(
+            "UPDATE help_requests SET status = 'answered', answer_value = ?, answer_note = ?, answered_by = ?, "
+            "answered_at = ? WHERE token = ? AND status = 'open'", (value, note, name, now(), token))
+        return _help_row(conn.execute("SELECT * FROM help_requests WHERE token = ?", (token,)).fetchone())
+
+
+def help_close(record_id: str, field: str, status: str, path: Path | None = None) -> None:
+    """End the active request of this field: canceled (by the secretary) or closed (she decided)."""
+    with _LOCK, _help_conn(path) as conn:
+        conn.execute(
+            "UPDATE help_requests SET status = ?, closed_at = ? WHERE record_id = ? AND field = ? "
+            "AND status IN ('open', 'answered')", (status, now(), record_id, field))
+
+
+def help_expire(token: str, path: Path | None = None) -> None:
+    """A link that ran out of time: marked, never deleted — a new link replaces it."""
+    with _LOCK, _help_conn(path) as conn:
+        conn.execute("UPDATE help_requests SET status = 'expired', closed_at = ? WHERE token = ? AND status = 'open'",
+                     (now(), token))

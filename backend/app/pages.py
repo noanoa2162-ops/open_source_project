@@ -11,6 +11,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -21,6 +23,8 @@ from app.files import KIND_PDF, sniff_path
 
 MAX_PIXELS = 60_000_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+# כמה עמודים מוכנים במקביל (Tesseract, יישור, שמירה). נמדד 21/10/2026: ~2 שניות לעמוד בחוט אחד.
+PAGE_WORKERS = 8
 
 
 def count_pages(source: Path) -> int:
@@ -59,23 +63,54 @@ def render_pages(
 
 
 def _render_pdf(source: Path, out_dir: Path, cap: int, on_page=None) -> tuple[list[Path], int]:
+    """The PDF itself is rendered page after page (pypdfium2 is not safe for threads on one
+    document, and it is the cheap part). The heavy part — Tesseract, straightening, saving the
+    PNG — runs for several pages at once. Every page goes through exactly the same steps as
+    before, so its pixels (and the saved answers keyed on them) do not change. `on_page` is
+    still called in page order."""
     pdf = pdfium.PdfDocument(source)
     try:
         total = len(pdf)
+        count = min(total, cap)
         scale = SETTINGS.page_render_dpi / 72.0
-        written: list[Path] = []
-        for index in range(min(total, cap)):
-            target = out_dir / f"page-{index + 1:03d}.png"
-            page = pdf[index]
-            image = page.render(scale=scale).to_pil().convert("RGB")
-            _guard(image)
-            image = _straightened(image, target)
-            image.save(target, format="PNG")
-            image.close()
-            page.close()
-            written.append(target)
-            if on_page:
-                on_page(index + 1, target)
+        written = [out_dir / f"page-{index + 1:03d}.png" for index in range(count)]
+        done = [False] * count
+        reported = [0]
+        report_lock = threading.Lock()
+        # כמה עמודים מוכנים לעבודה בבת אחת — שלא יתמלא הזיכרון בעמודים שמחכים לתור
+        room = threading.BoundedSemaphore(PAGE_WORKERS * 2)
+
+        def finish(index: int, image: Image.Image) -> None:
+            try:
+                target = written[index]
+                image = _straightened(image, target)
+                image.save(target, format="PNG")
+                image.close()
+            finally:
+                room.release()
+            with report_lock:
+                done[index] = True
+                # מדווחים לפי הסדר: עמוד 3 נספר רק אחרי 1 ו-2, גם אם הוא מוכן לפניהם
+                while reported[0] < count and done[reported[0]]:
+                    reported[0] += 1
+                    if on_page:
+                        on_page(reported[0], written[reported[0] - 1])
+
+        with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
+            futures = []
+            for index in range(count):
+                room.acquire()
+                try:
+                    page = pdf[index]
+                    image = page.render(scale=scale).to_pil().convert("RGB")
+                    page.close()
+                    _guard(image)
+                except BaseException:
+                    room.release()
+                    raise
+                futures.append(pool.submit(finish, index, image))
+            for future in futures:
+                future.result()  # עמוד שנכשל — אותה שגיאה כמו קודם, לפי הסדר
         return written, total
     finally:
         pdf.close()

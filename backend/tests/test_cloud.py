@@ -53,17 +53,132 @@ def test_cloud_rejects_unsafe_database_modes(cloud_settings, monkeypatch, url):
         gateway.validate_environment()
 
 
-def test_auth_and_cross_site_requests(cloud_settings):
+def test_config_exposes_the_deployment_origin_for_shared_links(cloud_settings, monkeypatch):
+    monkeypatch.setenv("CLOUD_MODE", "1")
+    assert api.config()["public_origin"] == cloud_settings["APP_ORIGIN"]
+    monkeypatch.setenv("CLOUD_MODE", "0")
+    assert api.config()["public_origin"] == ""
+
+
+def test_session_login_and_cross_site_requests(cloud_settings):
     app = FastAPI()
     app.add_middleware(gateway.CloudGateway)
-    client = TestClient(app)
-    assert client.get("/").status_code == 401
+    client = TestClient(app, base_url="https://test.example")
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/login"
+    login_page = client.get("/login")
+    assert login_page.status_code == 200
+    assert "WWW-Authenticate" not in login_page.headers
+    assert "כניסה למערכת" in login_page.text
+    api = client.get("/api/pending")
+    assert api.status_code == 401 and "WWW-Authenticate" not in api.headers
+
+    wrong = client.post(
+        "/auth/login",
+        data={"username": "demo", "password": "wrong"},
+        headers={"Origin": cloud_settings["APP_ORIGIN"]},
+    )
+    assert wrong.status_code == 200
+    assert gateway.SESSION_COOKIE not in wrong.cookies
+
+    logged_in = client.post(
+        "/auth/login",
+        data={"username": "demo", "password": cloud_settings["ACCESS_PASSWORD"]},
+        headers={"Origin": cloud_settings["APP_ORIGIN"]},
+        follow_redirects=False,
+    )
+    assert logged_in.status_code == 303 and logged_in.headers["location"] == "/"
+    cookie = logged_in.headers["set-cookie"].lower()
+    assert "secure" in cookie and "httponly" in cookie and "samesite=strict" in cookie
+    assert client.get("/").status_code == 404  # Authenticated, no route.
+    assert client.post("/api/test", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.post("/api/test").status_code == 403
+
+    logged_out = client.post(
+        "/auth/logout", headers={"Origin": cloud_settings["APP_ORIGIN"]}, follow_redirects=False,
+    )
+    assert logged_out.status_code == 303
     assert client.get("/api/pending").status_code == 401
-    assert client.get("/static/app.js", auth=("demo", "wrong")).status_code == 401
-    credentials = ("demo", cloud_settings["ACCESS_PASSWORD"])
-    assert client.post("/api/test", auth=credentials, headers={"Origin": "https://evil.example"}).status_code == 403
-    assert client.post("/api/test", auth=credentials).status_code == 403
-    assert client.get("/", auth=credentials).status_code == 404  # Authenticated, no route.
+
+
+def test_public_demo_has_no_login_but_requires_a_signed_browser_session(
+        cloud_settings, monkeypatch):
+    monkeypatch.setenv("PUBLIC_DEMO", "1")
+    monkeypatch.setattr(storage, "reset_scratch", lambda: None)
+    app = FastAPI()
+
+    @app.get("/")
+    def home():
+        return {"ready": True}
+
+    @app.get("/api/ping")
+    def ping():
+        return {"ready": True}
+
+    @app.post("/api/ping")
+    def change():
+        return {"ready": True}
+
+    app.add_middleware(gateway.CloudGateway)
+    direct = TestClient(app, base_url="https://test.example")
+    assert direct.get("/api/ping").status_code == 401
+
+    client = TestClient(app, base_url="https://test.example")
+    first = client.get("/", follow_redirects=False)
+    assert first.status_code == 303 and first.headers["location"] == "/"
+    cookie = first.headers["set-cookie"].lower()
+    assert "secure" in cookie and "httponly" in cookie and "samesite=strict" in cookie
+    assert client.get("/").json() == {"ready": True}
+    assert client.get("/login", follow_redirects=False).headers["location"] == "/"
+    assert client.get("/api/ping").json() == {"ready": True}
+    assert client.post("/api/ping", headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+def test_public_help_links_and_assets_keep_origin_protection(cloud_settings, monkeypatch):
+    monkeypatch.setattr(storage, "reset_scratch", lambda: None)
+    app = FastAPI()
+
+    @app.get("/help/{token}")
+    def help_page(token: str):
+        return {"token": token}
+
+    @app.get("/api/help/{token}")
+    def help_data(token: str):
+        return {"token": token}
+
+    @app.post("/api/help/{token}/answer")
+    def help_answer(token: str):
+        return {"token": token}
+
+    app.add_middleware(gateway.CloudGateway)
+    client = TestClient(app, base_url="https://test.example")
+    assert client.get("/help/public-token").status_code == 200
+    assert client.get("/api/help/public-token").status_code == 200
+    assert client.get("/app/assets/missing.js").status_code == 404
+    assert client.get("/static/brand/missing.png").status_code == 404
+    assert client.post(
+        "/api/help/public-token/answer", headers={"Origin": "https://evil.example"}
+    ).status_code == 403
+    assert client.get("/", follow_redirects=False).status_code == 303
+
+
+def test_tampered_or_expired_session_is_rejected(cloud_settings, monkeypatch):
+    app = FastAPI()
+    app.add_middleware(gateway.CloudGateway)
+    client = TestClient(app, base_url="https://test.example")
+    now = 2_000_000_000
+    monkeypatch.setattr(gateway.time, "time", lambda: now)
+    client.post(
+        "/auth/login",
+        data={"username": "demo", "password": cloud_settings["ACCESS_PASSWORD"]},
+        headers={"Origin": cloud_settings["APP_ORIGIN"]},
+    )
+    valid = client.cookies.get(gateway.SESSION_COOKIE)
+    client.cookies.set(gateway.SESSION_COOKIE, valid + "x")
+    assert client.get("/api/pending").status_code == 401
+    client.cookies.set(gateway.SESSION_COOKIE, valid)
+    monkeypatch.setattr(gateway.time, "time", lambda: now + gateway.SESSION_SECONDS + 1)
+    assert client.get("/api/pending").status_code == 401
 
 
 def test_parameters_do_not_rewrite_literals_or_values():
@@ -201,8 +316,17 @@ def seeded():
     source = SourceFile(index=1, filename="synthetic.png", kind="png", page_count=1, sha256="abc123")
     batch.sources.append(source)
     record = FormRecord.empty(batch.batch_id, source, 1)
+    valid_values = {
+        "first_name": "שם בדיקה",
+        "last_name": "ישראל",
+        "national_id": "123456782",
+        "central_numbers": "123",
+        "sample_received_date": "01/01/2020",
+        "sending_entity": "מכבי",
+        "commitment_numbers": "123",
+    }
     for key, field in record.fields.items():
-        field.values = ["123"] if key != "first_name" else ["שם בדיקה"]
+        field.values = [valid_values[key]]
         field.state = "approved"
     batch.records.append(record)
     batch.pages.append({"source_index": 1, "page_number": 1, "record_id": record.record_id, "status": "done"})

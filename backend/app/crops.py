@@ -28,10 +28,11 @@ def padded(region: Region) -> Region:
     return (max(0.0, x0 - dx), max(0.0, y0 - dy), min(1.0, x1 + dx), min(1.0, y1 + dy))
 
 
-def crop_field(page_png: Path, region: Region, target: Path) -> Path:
+def crop_field(page_png: Path, region: Region, target: Path, pad: bool = True) -> Path:
+    """pad=False cuts exactly the region — an area a person already chose (dragged zoom)."""
     if target.is_file():
         return target
-    x0, y0, x1, y1 = padded(region)
+    x0, y0, x1, y1 = padded(region) if pad else region
     with Image.open(page_png) as page:
         width, height = page.size
         box = (

@@ -26,8 +26,8 @@ class Settings:
     max_cost_per_batch_usd: float
     max_parallel_calls: int = 6
     # עומק החשיבה של Claude: low | medium | high | xhigh | max. ב-Opus 5.5 החשיבה
-    # תמיד פועלת; זה רק קובע כמה עמוק. נועה בחרה high.
-    claude_effort: str = "high"
+    # תמיד פועלת; זה רק קובע כמה עמוק. נועה בחרה medium (22/10/2026, במקום high — מהירות).
+    claude_effort: str = "medium"
     straighten_pages: bool = True  # ליישר מקומית דף עקום או על הצד, לפני הקריאה
     auto_rotate: bool = True  # לזהות דף מסובב (90°/180°/270°) עם Tesseract ולסובב לפני הקריאה
     # מיתוג המסך: moh = עיצוב משרד הבריאות (באישור נועה, 18/10/2026); neutral = הסמל שלנו
@@ -76,7 +76,7 @@ def load_settings() -> Settings:
         # כמה טפסים מעובדים בו־זמנית. חשיבה עמוקה איטית — לכן כמה במקביל.
         max_parallel_calls=max(1, _int("MAX_PARALLEL_CALLS", 6)),
         claude_effort=_first(
-            "READER_EFFORT", "JUDGE_EFFORT", "JUDGE_B_EFFORT", default="high"
+            "READER_EFFORT", "JUDGE_EFFORT", "JUDGE_B_EFFORT", default="medium"
         ).lower(),
         straighten_pages=_flag("STRAIGHTEN_PAGES"),
         auto_rotate=_flag("AUTO_ROTATE"),
