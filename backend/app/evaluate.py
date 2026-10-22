@@ -268,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         # בשורש הפרויקט (ב-Git, להגשה): רק מספרים — בלי תמונות ובלי טבלת האמת עצמה
         out = PROJECT_ROOT / "EVALUATION.md"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(report, encoding="utf-8")
+        # dir="rtl": ב-GitHub הדוח העברי מוצג מימין לשמאל (אחרת הוא מוצג משמאל לימין)
+        out.write_text('<div dir="rtl">\n\n' + report + '\n</div>\n', encoding="utf-8")
         print(report)
         print(f"נשמר: {out}  · אף קריאה למודל, עלות 0.")
         return 0
