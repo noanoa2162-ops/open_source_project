@@ -701,10 +701,25 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_HELP_READY = False  # בענן: הטבלה כבר וודאה בתהליך הזה
+
+
 def _help_conn(path: Path | None = None) -> sqlite3.Connection:
+    global _HELP_READY
     conn = _connect(path)
     if cloud_enabled() and path is None:
-        return conn  # בענן הטבלה נוצרת ב-cloud/postgres.py (initialize)
+        # הטבלה נוצרת גם ב-cloud/postgres.py (initialize), אבל רק בהרצה ידנית אחרי הפריסה — וממחשב
+        # שהרשת שלו חוסמת את פורט 5432 אי אפשר להריץ אותה. בלי הטבלה, "🙋 עזרה" נכשל בענן
+        # ("לא ניתן להשלים את השמירה", 22/10/2026). לכן: פעם אחת לכל תהליך, IF NOT EXISTS — בטוח להריץ שוב.
+        # "מוכנה" רק אחרי שהטבלה נמצאה קיימת: יצירה בבקשה שבוטלה (rollback) נבדקת שוב בבקשה הבאה
+        if not _HELP_READY:
+            if conn.execute("SELECT to_regclass('help_requests') AS t").fetchone()["t"]:
+                _HELP_READY = True
+            else:
+                for statement in _HELP_SCHEMA.split(";"):
+                    if statement.strip():
+                        conn.execute(statement)
+        return conn
     conn.executescript(_HELP_SCHEMA)
     return conn
 
