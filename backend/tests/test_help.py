@@ -192,3 +192,33 @@ def test_before_48_hours_the_link_still_works(monkeypatch):
     monkeypatch.setattr("app.db._utcnow", lambda: almost)
     assert client.get(f"/api/help/{token}").json()["status"] == "open"
     assert client.post(f"/api/help/{token}/answer", json={"value": "011223344"}).status_code == 200
+
+
+def test_in_the_cloud_the_help_table_is_created_when_missing(monkeypatch):
+    """22/10/2026: in the cloud "🙋 עזרה" failed — the table is made only by a manual command after
+    deploying, which a network blocking port 5432 cannot run. Now the first help call creates it."""
+
+    class Conn:
+        def __init__(self, exists):
+            self.exists, self.sql = exists, []
+
+        def execute(self, sql, params=None):
+            self.sql.append(" ".join(sql.split()))
+            row = {"t": "help_requests" if self.exists else None}
+            return type("R", (), {"fetchone": lambda _: row})()
+
+    monkeypatch.setattr(db, "cloud_enabled", lambda: True)
+    monkeypatch.setattr(db, "_HELP_READY", False)
+
+    missing = Conn(exists=False)
+    monkeypatch.setattr(db, "_connect", lambda path=None: missing)
+    db._help_conn()
+    assert any(s.startswith("CREATE TABLE IF NOT EXISTS help_requests") for s in missing.sql)
+    assert db._HELP_READY is False, "נבדק שוב בבקשה הבאה — אולי היצירה בוטלה"
+
+    there = Conn(exists=True)
+    monkeypatch.setattr(db, "_connect", lambda path=None: there)
+    db._help_conn()
+    db._help_conn()
+    assert not any("CREATE" in s for s in there.sql) and db._HELP_READY is True
+    assert len(there.sql) == 1, "אחרי שנמצאה — בלי בדיקה נוספת"
